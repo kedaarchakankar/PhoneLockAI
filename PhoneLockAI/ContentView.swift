@@ -8,6 +8,8 @@
 import SwiftUI
 import Foundation
 import UserNotifications
+import FamilyControls
+import ManagedSettings
 
 // MARK: - Models
 
@@ -101,6 +103,29 @@ struct Goal: Identifiable, Codable, Hashable {
     }
 }
 
+extension Goal {
+    /// Whether this goal applies to the given local calendar day (`dayStart` should be start-of-day).
+    func matchesCalendarDay(_ dayStart: Date, calendar: Calendar = .current) -> Bool {
+        let start = calendar.startOfDay(for: dayStart)
+        switch repeatFrequency {
+        case .none:
+            let gDay = nonRepeatingDayStart.map { calendar.startOfDay(for: $0) } ?? start
+            return gDay == start
+        case .daily:
+            return true
+        case .weekly:
+            let weekday = calendar.component(.weekday, from: start)
+            let anchor = weeklyAnchorWeekday ?? weekday
+            return weekday == anchor
+        }
+    }
+
+    /// Daily or weekly goals (shown on the All Goals screen).
+    var isRepeating: Bool {
+        repeatFrequency == .daily || repeatFrequency == .weekly
+    }
+}
+
 struct UnlockSessionRecord: Identifiable, Codable {
     var id: UUID
     var startDate: Date
@@ -144,6 +169,12 @@ final class PhoneLockStore: ObservableObject {
     @Published var emergencyUnlockEnabled: Bool {
         didSet { persistEmergencyEnabled() }
     }
+    @Published var blockedAppsSelection: FamilyActivitySelection {
+        didSet {
+            persistBlockedAppsSelection()
+            applyBlockingPolicy()
+        }
+    }
 
     // Unlock sessions
     @Published private(set) var sessionRecords: [UnlockSessionRecord] {
@@ -160,6 +191,7 @@ final class PhoneLockStore: ObservableObject {
     @Published var lastUnlockedSessionID: UUID?
 
     private let defaults = UserDefaults.standard
+    private let managedSettingsStore = ManagedSettingsStore()
     private var lastStreakProcessedDayStart: Date? {
         didSet { persistStreakState() }
     }
@@ -173,6 +205,7 @@ final class PhoneLockStore: ObservableObject {
         static let sessions = "pol_sessions"
         static let streakDays = "pol_streak_days"
         static let streakLastProcessedDayStart = "pol_streak_last_processed_day_start"
+        static let blockedAppsSelection = "pol_blocked_apps_selection"
     }
 
     init() {
@@ -185,6 +218,7 @@ final class PhoneLockStore: ObservableObject {
         self.emergencyUnlockEnabled = defaults.object(forKey: Keys.emergencyEnabled) == nil ? true : defaults.bool(forKey: Keys.emergencyEnabled)
         self.sessionRecords = storedSessions
         self.streakDays = defaults.integer(forKey: Keys.streakDays)
+        self.blockedAppsSelection = Self.loadCodable(forKey: Keys.blockedAppsSelection, as: FamilyActivitySelection.self) ?? FamilyActivitySelection()
         if defaults.object(forKey: Keys.streakLastProcessedDayStart) != nil {
             let ts = defaults.double(forKey: Keys.streakLastProcessedDayStart)
             self.lastStreakProcessedDayStart = Date(timeIntervalSince1970: ts)
@@ -207,6 +241,7 @@ final class PhoneLockStore: ObservableObject {
         Task {
             await GoalReminderScheduler.shared.syncReminders(for: goals)
         }
+        applyBlockingPolicy()
     }
 
     var dailyLimitSeconds: Int {
@@ -252,6 +287,10 @@ final class PhoneLockStore: ObservableObject {
         }
     }
 
+    private func persistBlockedAppsSelection() {
+        Self.persistCodable(blockedAppsSelection, forKey: Keys.blockedAppsSelection, using: defaults)
+    }
+
     /// Drops non-repeating (`.none`) goals after the local calendar day they belong to ends.
     func pruneExpiredNoneRepeatGoalsIfNeeded(now: Date = Date()) {
         let calendar = Calendar.current
@@ -288,6 +327,7 @@ final class PhoneLockStore: ObservableObject {
         activeSessionIsEmergency = isEmergency
         activeSessionDurationSeconds = TimeInterval(max(1, durationMinutes) * 60)
         activeSessionStartDate = Date()
+        applyBlockingPolicy()
     }
 
     func endActiveUnlock() {
@@ -305,6 +345,31 @@ final class PhoneLockStore: ObservableObject {
         activeSessionStartDate = nil
         activeSessionIsEmergency = false
         activeSessionDurationSeconds = 5 * 60
+        applyBlockingPolicy()
+    }
+
+    var blockedAppCount: Int {
+        blockedAppsSelection.applicationTokens.count
+    }
+
+    var blockedAppTokens: [ApplicationToken] {
+        Array(blockedAppsSelection.applicationTokens).sorted { "\($0)" < "\($1)" }
+    }
+
+    func requestFamilyControlsAuthorizationIfNeeded() async {
+        do {
+            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+        } catch {
+            // Keep onboarding/settings usable even if authorization is declined for now.
+        }
+    }
+
+    private func applyBlockingPolicy() {
+        if isUnlockActive || blockedAppsSelection.applicationTokens.isEmpty {
+            managedSettingsStore.shield.applications = nil
+            return
+        }
+        managedSettingsStore.shield.applications = blockedAppsSelection.applicationTokens
     }
 
     // MARK: - Time calculations (today + streak)
@@ -399,8 +464,24 @@ final class PhoneLockStore: ObservableObject {
         return "\(m)m"
     }
 
+    /// Goals that apply to the local calendar day containing `now` (non-repeating, daily, or weekly on the anchor day).
+    func goalsForToday(now: Date = Date()) -> [Goal] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: now)
+        return goals.filter { $0.matchesCalendarDay(dayStart, calendar: calendar) }
+    }
+
+    /// All Goals screen: every **repeating** goal (daily + weekly), plus **non-repeating** goals whose local day is `now` (removed from storage after that day ends via pruning).
+    func goalsForAllGoalsPage(now: Date = Date()) -> [Goal] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: now)
+        return goals.filter { goal in
+            goal.isRepeating || goal.matchesCalendarDay(dayStart, calendar: calendar)
+        }
+    }
+
     var primaryGoalText: String {
-        goals.first?.text ?? "Your goal"
+        goalsForToday().first?.text ?? "Your goal"
     }
 
     // MARK: - Unlock duration defaults
@@ -500,6 +581,7 @@ private enum Route: Hashable {
     case settings
     case addGoal
     case editGoal(Goal)
+    case allGoals
 }
 
 struct ContentView: View {
@@ -517,7 +599,8 @@ struct ContentView: View {
                             onStartChat: { navPath.append(.chat) },
                             onOpenSettings: { navPath.append(.settings) },
                             onAddGoal: { navPath.append(.addGoal) },
-                            onEditGoal: { goal in navPath.append(.editGoal(goal)) }
+                            onEditGoal: { goal in navPath.append(.editGoal(goal)) },
+                            onSeeAllGoals: { navPath.append(.allGoals) }
                         )
                         .allowsHitTesting(!store.isUnlockActive)
 
@@ -565,6 +648,12 @@ struct ContentView: View {
                                 },
                                 onCancel: { navPath.removeLast() }
                             )
+                        case .allGoals:
+                            AllGoalsView(
+                                store: store,
+                                onAddGoal: { navPath.append(.addGoal) },
+                                onEditGoal: { goal in navPath.append(.editGoal(goal)) }
+                            )
                         }
                     }
                 }
@@ -591,9 +680,10 @@ struct OnboardingView: View {
     var onDone: () -> Void
 
     @State private var newGoalText: String = ""
+    @State private var showingAppPicker = false
 
     var canContinue: Bool {
-        store.dailyLimitSeconds > 0 && !store.goals.isEmpty
+        store.dailyLimitSeconds > 0 && !store.goals.isEmpty && store.blockedAppCount > 0
     }
 
     var body: some View {
@@ -658,6 +748,42 @@ struct OnboardingView: View {
                         .padding(.vertical, 6)
                     }
 
+                    GroupBox(label: Text("Blocked Apps").font(.subheadline).foregroundStyle(.secondary)) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Choose the apps you want PhoneLockAI to block when you're locked.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                showingAppPicker = true
+                            } label: {
+                                Text(store.blockedAppCount == 0 ? "Select Blocked Apps" : "Edit Blocked Apps (\(store.blockedAppCount))")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            if store.blockedAppCount == 0 {
+                                Text("Select at least one app to continue.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(store.blockedAppTokens, id: \.self) { token in
+                                            Label(token)
+                                                .lineLimit(1)
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(.thinMaterial)
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+
                     Button {
                         onDone()
                     } label: {
@@ -671,6 +797,13 @@ struct OnboardingView: View {
                 .padding()
             }
             .navigationTitle("Onboarding")
+            .task {
+                await store.requestFamilyControlsAuthorizationIfNeeded()
+            }
+            .familyActivityPicker(
+                isPresented: $showingAppPicker,
+                selection: $store.blockedAppsSelection
+            )
         }
     }
 }
@@ -683,9 +816,17 @@ struct HomeDashboardView: View {
     var onOpenSettings: () -> Void
     var onAddGoal: () -> Void
     var onEditGoal: (Goal) -> Void
+    var onSeeAllGoals: () -> Void
     // For the mock: keep Home's ring updated on state changes.
     // (The sticky countdown during an active unlock session provides the real-time UX.)
     @State private var now: Date = Date()
+    @State private var midnightRefreshTask: Task<Void, Never>? = nil
+    private static let todayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long   // "March 25, 2026" (locale-aware)
+        f.timeStyle = .none
+        return f
+    }()
 
     var body: some View {
         AnyView(
@@ -704,14 +845,48 @@ struct HomeDashboardView: View {
                         .accessibilityLabel("Settings")
                     }
 
+                    Text("Today, \(Self.todayFormatter.string(from: now))")
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 23)
+
                     HomeStatusView(store: store, now: now)
-                        .padding(.top, 100)
-                    GoalsListView(store: store, onAddGoal: onAddGoal, onEditGoal: onEditGoal)
+                        .padding(.top, 60)
+                    GoalsListView(
+                        store: store,
+                        now: now,
+                        onAddGoal: onAddGoal,
+                        onEditGoal: onEditGoal,
+                        onSeeAllGoals: onSeeAllGoals
+                    )
                     HomeActionsView(store: store, onStartChat: onStartChat)
                 }
                 .padding()
             }
             .onAppear { now = Date() }
+            .onAppear {
+                // Keep the "Today, ..." label accurate while the app stays open.
+                // We refresh once per day, right after the next local midnight.
+                midnightRefreshTask?.cancel()
+                midnightRefreshTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        let nextMidnight = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date())) ?? Date().addingTimeInterval(24*3600)
+                        let delaySeconds = max(0, nextMidnight.timeIntervalSince(Date()))
+                        let delayNanos = UInt64(delaySeconds * 1_000_000_000)
+                        do {
+                            try await Task.sleep(nanoseconds: delayNanos)
+                        } catch {
+                            break
+                        }
+                        now = Date()
+                    }
+                }
+            }
+            .onDisappear {
+                midnightRefreshTask?.cancel()
+                midnightRefreshTask = nil
+            }
             .onChange(of: store.isUnlockActive) { _, _ in
                 // Refresh once when sessions start/end; Home visual is derived from accumulated active time.
                 now = Date()
@@ -775,15 +950,21 @@ struct HomeStatusView: View {
 
 struct GoalsListView: View {
     @ObservedObject var store: PhoneLockStore
+    let now: Date
     let onAddGoal: () -> Void
     let onEditGoal: (Goal) -> Void
+    let onSeeAllGoals: () -> Void
     @State private var selectedGoalID: UUID?
     @State private var showGoalActions = false
-    
+
+    private var todaysGoals: [Goal] {
+        store.goalsForToday(now: now)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Goals")
+                Text("Today's Goals")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -797,35 +978,52 @@ struct GoalsListView: View {
                 }
                 .accessibilityLabel("Add Goal")
             }
-            
-            VStack(spacing: 10) {
-                ForEach(store.goals) { goal in
-                    Button {
-                        selectedGoalID = goal.id
-                        showGoalActions = true
-                    } label: {
-                        GoalRowView(text: goal.text, isCompleted: goal.isCompleted)
+
+            if todaysGoals.isEmpty {
+                Text("No goals for today.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(todaysGoals) { goal in
+                        Button {
+                            selectedGoalID = goal.id
+                            showGoalActions = true
+                        } label: {
+                            GoalRowView(text: goal.text, isCompleted: goal.isCompleted)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+
+            Button {
+                onSeeAllGoals()
+            } label: {
+                Text("See all goals")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .padding(.top, 4)
         }
         .confirmationDialog(
             "Goal Options",
             isPresented: $showGoalActions,
             titleVisibility: .visible
         ) {
-            if let index = selectedGoalIndex {
+            if let goal = selectedGoal {
                 Button("Edit Goal") {
-                    onEditGoal(store.goals[index])
+                    onEditGoal(goal)
                     selectedGoalID = nil
                 }
-                Button(store.goals[index].isCompleted ? "Mark as Incomplete" : "Mark as Complete") {
-                    store.goals[index].isCompleted.toggle()
+                Button(goal.isCompleted ? "Mark as Incomplete" : "Mark as Complete") {
+                    toggleComplete(for: goal.id)
                 }
                 Button("Delete Goal", role: .destructive) {
-                    let id = store.goals[index].id
-                    store.goals.removeAll { $0.id == id }
+                    store.goals.removeAll { $0.id == goal.id }
                     selectedGoalID = nil
                 }
             }
@@ -835,9 +1033,100 @@ struct GoalsListView: View {
         }
     }
 
-    private var selectedGoalIndex: Int? {
+    private var selectedGoal: Goal? {
         guard let selectedGoalID else { return nil }
-        return store.goals.firstIndex(where: { $0.id == selectedGoalID })
+        return todaysGoals.first(where: { $0.id == selectedGoalID })
+    }
+
+    private func toggleComplete(for id: UUID) {
+        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
+        var g = store.goals[idx]
+        g.isCompleted.toggle()
+        store.goals[idx] = g
+    }
+}
+
+struct AllGoalsView: View {
+    @ObservedObject var store: PhoneLockStore
+    let onAddGoal: () -> Void
+    let onEditGoal: (Goal) -> Void
+    @State private var selectedGoalID: UUID?
+    @State private var showGoalActions = false
+
+    private var listedGoals: [Goal] {
+        store.goalsForAllGoalsPage(now: Date())
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if listedGoals.isEmpty {
+                    Text("No goals yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(listedGoals) { goal in
+                            Button {
+                                selectedGoalID = goal.id
+                                showGoalActions = true
+                            } label: {
+                                GoalRowView(text: goal.text, isCompleted: goal.isCompleted)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("All Goals")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    onAddGoal()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Add Goal")
+            }
+        }
+        .confirmationDialog(
+            "Goal Options",
+            isPresented: $showGoalActions,
+            titleVisibility: .visible
+        ) {
+            if let goal = selectedGoal {
+                Button("Edit Goal") {
+                    onEditGoal(goal)
+                    selectedGoalID = nil
+                }
+                Button(goal.isCompleted ? "Mark as Incomplete" : "Mark as Complete") {
+                    toggleComplete(for: goal.id)
+                }
+                Button("Delete Goal", role: .destructive) {
+                    store.goals.removeAll { $0.id == goal.id }
+                    selectedGoalID = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                selectedGoalID = nil
+            }
+        }
+    }
+
+    private var selectedGoal: Goal? {
+        guard let selectedGoalID else { return nil }
+        return listedGoals.first(where: { $0.id == selectedGoalID })
+    }
+
+    private func toggleComplete(for id: UUID) {
+        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
+        var g = store.goals[idx]
+        g.isCompleted.toggle()
+        store.goals[idx] = g
     }
 }
 
@@ -1090,7 +1379,7 @@ struct ChatUnlockView: View {
         do {
             let assistantText = try await openAI.send(
                 conversation: messages,
-                goals: store.goals.map(\.text)
+                goals: store.goalsForToday().map(\.text)
             )
             messages.append(ChatMessage(role: .assistant, content: assistantText))
             // Unlock button only when assistant uses the exact phrase from PhoneLockAI prompt.txt:
@@ -1316,7 +1605,7 @@ struct SettingsView: View {
                 EditDailyLimitView(store: store)
             }
             NavigationLink("Edit Blocked Apps") {
-                EditBlockedAppsView()
+                EditBlockedAppsView(store: store)
             }
             NavigationLink("Contact Us") {
                 ContactUsView()
@@ -1427,18 +1716,45 @@ struct EmergencyUnlockSettingsView: View {
 }
 
 struct EditBlockedAppsView: View {
+    @ObservedObject var store: PhoneLockStore
+    @State private var showingAppPicker = false
+
     var body: some View {
-        VStack {
-            Spacer()
-            Text("Edit Blocked Apps")
-                .font(.headline)
-            Text("Coming soon")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Spacer()
+        List {
+            Section {
+                Text("Apps in this list are blocked whenever your unlock timer is not active.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Blocked Apps") {
+                if store.blockedAppTokens.isEmpty {
+                    Text("No blocked apps selected.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.blockedAppTokens, id: \.self) { token in
+                        Label(token)
+                    }
+                }
+            }
+
+            Section {
+                Button {
+                    showingAppPicker = true
+                } label: {
+                    Text(store.blockedAppTokens.isEmpty ? "Select Blocked Apps" : "Edit Blocked Apps")
+                }
+                .buttonStyle(.borderedProminent)
+            }
         }
-        .padding()
         .navigationTitle("Edit Blocked Apps")
+        .task {
+            await store.requestFamilyControlsAuthorizationIfNeeded()
+        }
+        .familyActivityPicker(
+            isPresented: $showingAppPicker,
+            selection: $store.blockedAppsSelection
+        )
     }
 }
 
@@ -1493,6 +1809,7 @@ struct AddGoalView: View {
 
     @State private var goalName: String = ""
     @State private var repeatFrequency: GoalRepeatFrequency = .none
+    @State private var weeklyRepeatWeekday: Int = Calendar.current.component(.weekday, from: Date())
     @State private var isTimed: Bool = false
     @State private var targetTime: Date = Date()
 
@@ -1514,10 +1831,20 @@ struct AddGoalView: View {
         }
     }
 
-    /// Weekday (1…7) for weekly timed reminders; fixed after first save, preserved on edit unless repeat mode changes.
+    private var weekdayChoices: [(value: Int, label: String)] {
+        let symbols = Calendar.current.weekdaySymbols
+        return Array(symbols.enumerated()).map { index, name in
+            (value: index + 1, label: name)
+        }
+    }
+
+    /// Weekday (1…7) for weekly goals; preserves existing value on edit unless repeat mode changes.
     private func resolvedWeeklyAnchorWeekday(original: Goal?) -> Int? {
-        guard repeatFrequency == .weekly && isTimed else { return nil }
-        if let original, original.repeatFrequency == .weekly, original.isTimed, let existing = original.weeklyAnchorWeekday {
+        guard repeatFrequency == .weekly else { return nil }
+        if (1...7).contains(weeklyRepeatWeekday) {
+            return weeklyRepeatWeekday
+        }
+        if let original, original.repeatFrequency == .weekly, let existing = original.weeklyAnchorWeekday {
             return existing
         }
         return Calendar.current.component(.weekday, from: Date())
@@ -1543,6 +1870,27 @@ struct AddGoalView: View {
                             Text("Weekly").tag(GoalRepeatFrequency.weekly)
                         }
                         .pickerStyle(.segmented)
+                        if repeatFrequency == .weekly {
+                            VStack {
+                                Spacer(minLength: 0)
+                                HStack(spacing: 8) {
+                                    Text("Repeat Every:")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    Picker("Repeat Every", selection: $weeklyRepeatWeekday) {
+                                        ForEach(weekdayChoices, id: \.value) { weekday in
+                                            Text(weekday.label).tag(weekday.value)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.top, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxHeight: 32)
+                        }
                     }
                     .padding(.vertical, 6)
                 }
@@ -1611,6 +1959,7 @@ struct AddGoalView: View {
             if case .edit(let goal) = mode {
                 goalName = goal.text
                 repeatFrequency = goal.repeatFrequency
+                weeklyRepeatWeekday = goal.weeklyAnchorWeekday ?? Calendar.current.component(.weekday, from: Date())
                 isTimed = goal.isTimed
                 targetTime = goal.targetTime ?? Date()
             }
