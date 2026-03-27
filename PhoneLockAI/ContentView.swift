@@ -10,6 +10,7 @@ import Foundation
 import UserNotifications
 import FamilyControls
 import ManagedSettings
+import DeviceActivity
 
 // MARK: - Models
 
@@ -144,6 +145,14 @@ struct UnlockSessionRecord: Identifiable, Codable {
 
 @MainActor
 final class PhoneLockStore: ObservableObject {
+    private enum ScreenTimeConfig {
+        static let unlockActivityName = DeviceActivityName("com.phonelockai.unlock.session")
+        static let activeShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.active")
+        static let legacyBaselineShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.baseline")
+        static let sharedDefaultsSuite = "group.com.phonelockai.shared"
+        static let unlockEndedAtKey = "pol_unlock_ended_at"
+    }
+
     // User profile
     @Published var hasOnboarded: Bool {
         didSet { persistHasOnboarded() }
@@ -172,6 +181,7 @@ final class PhoneLockStore: ObservableObject {
     @Published var blockedAppsSelection: FamilyActivitySelection {
         didSet {
             persistBlockedAppsSelection()
+            persistBlockedAppsSelectionToSharedDefaults()
             applyBlockingPolicy()
         }
     }
@@ -191,7 +201,9 @@ final class PhoneLockStore: ObservableObject {
     @Published var lastUnlockedSessionID: UUID?
 
     private let defaults = UserDefaults.standard
-    private let managedSettingsStore = ManagedSettingsStore()
+    private let activeShieldStore = ManagedSettingsStore(named: ScreenTimeConfig.activeShieldStoreName)
+    private let deviceActivityCenter = DeviceActivityCenter()
+    private var monitoredUnlockEndDate: Date?
     private var lastStreakProcessedDayStart: Date? {
         didSet { persistStreakState() }
     }
@@ -241,6 +253,8 @@ final class PhoneLockStore: ObservableObject {
         Task {
             await GoalReminderScheduler.shared.syncReminders(for: goals)
         }
+        clearLegacyBaselineShieldStoreIfNeeded()
+        persistBlockedAppsSelectionToSharedDefaults()
         applyBlockingPolicy()
     }
 
@@ -253,7 +267,15 @@ final class PhoneLockStore: ObservableObject {
         return Date().timeIntervalSince(start)
     }
 
-    var isUnlockActive: Bool { activeSessionStartDate != nil }
+    var activeSessionPlannedEndDate: Date? {
+        guard let start = activeSessionStartDate else { return nil }
+        return start.addingTimeInterval(activeSessionDurationSeconds)
+    }
+
+    var isUnlockActive: Bool {
+        guard let end = activeSessionPlannedEndDate else { return false }
+        return Date() < end
+    }
 
     // MARK: - Persistence
 
@@ -291,6 +313,11 @@ final class PhoneLockStore: ObservableObject {
         Self.persistCodable(blockedAppsSelection, forKey: Keys.blockedAppsSelection, using: defaults)
     }
 
+    private func persistBlockedAppsSelectionToSharedDefaults() {
+        guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
+        Self.persistCodable(blockedAppsSelection, forKey: Keys.blockedAppsSelection, using: sharedDefaults)
+    }
+
     /// Drops non-repeating (`.none`) goals after the local calendar day they belong to ends.
     func pruneExpiredNoneRepeatGoalsIfNeeded(now: Date = Date()) {
         let calendar = Calendar.current
@@ -322,21 +349,33 @@ final class PhoneLockStore: ObservableObject {
 
     // MARK: - Unlock control (mock)
 
+    private static let unlockThirtySecondWarningNotificationID = "pol_unlock_30s_warning"
+
     func startUnlock(durationMinutes: Int, isEmergency: Bool) {
+        reconcileActiveUnlockIfNeeded()
         guard activeSessionStartDate == nil else { return }
         activeSessionIsEmergency = isEmergency
         activeSessionDurationSeconds = TimeInterval(max(1, durationMinutes) * 60)
         activeSessionStartDate = Date()
+        clearSharedUnlockEndedMarker()
+        ensureUnlockExpiryMonitorIsScheduled()
+        scheduleUnlockThirtySecondWarningNotification()
         applyBlockingPolicy()
     }
 
     func endActiveUnlock() {
         guard let start = activeSessionStartDate else { return }
-        let end = Date()
+        let now = Date()
+        let plannedEnd = activeSessionPlannedEndDate ?? now
+        endActiveUnlock(start: start, end: min(now, plannedEnd))
+    }
+
+    private func endActiveUnlock(start: Date, end: Date) {
+        let effectiveEnd = max(start, end)
 
         let record = UnlockSessionRecord(
             startDate: start,
-            endDate: end,
+            endDate: effectiveEnd,
             isEmergency: activeSessionIsEmergency
         )
         sessionRecords.append(record)
@@ -345,7 +384,27 @@ final class PhoneLockStore: ObservableObject {
         activeSessionStartDate = nil
         activeSessionIsEmergency = false
         activeSessionDurationSeconds = 5 * 60
+        stopUnlockExpiryMonitor()
+        cancelUnlockThirtySecondWarningNotification()
+        clearSharedUnlockEndedMarker()
         applyBlockingPolicy()
+    }
+
+    func reconcileActiveUnlockIfNeeded(now: Date = Date()) {
+        reconcileFromSharedUnlockEndedMarker(now: now)
+
+        guard let start = activeSessionStartDate,
+              let plannedEnd = activeSessionPlannedEndDate else {
+            applyBlockingPolicy()
+            return
+        }
+
+        if now >= plannedEnd {
+            endActiveUnlock(start: start, end: plannedEnd)
+        } else {
+            ensureUnlockExpiryMonitorIsScheduled()
+            applyBlockingPolicy()
+        }
     }
 
     var blockedAppCount: Int {
@@ -365,11 +424,138 @@ final class PhoneLockStore: ObservableObject {
     }
 
     private func applyBlockingPolicy() {
+        let selectedApps = blockedAppsSelection.applicationTokens
+
         if isUnlockActive || blockedAppsSelection.applicationTokens.isEmpty {
-            managedSettingsStore.shield.applications = nil
+            activeShieldStore.shield.applications = nil
             return
         }
-        managedSettingsStore.shield.applications = blockedAppsSelection.applicationTokens
+        activeShieldStore.shield.applications = selectedApps
+    }
+
+    private func clearLegacyBaselineShieldStoreIfNeeded() {
+        let legacyStore = ManagedSettingsStore(named: ScreenTimeConfig.legacyBaselineShieldStoreName)
+        legacyStore.shield.applications = nil
+    }
+
+    private func reconcileFromSharedUnlockEndedMarker(now: Date) {
+        guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite),
+              let marker = sharedDefaults.object(forKey: ScreenTimeConfig.unlockEndedAtKey) as? Double else {
+            return
+        }
+
+        defer {
+            sharedDefaults.removeObject(forKey: ScreenTimeConfig.unlockEndedAtKey)
+        }
+
+        guard let start = activeSessionStartDate else { return }
+        let markerDate = Date(timeIntervalSince1970: marker)
+        let plannedEnd = activeSessionPlannedEndDate ?? markerDate
+        let boundedEnd = min(max(start, markerDate), plannedEnd, now)
+        endActiveUnlock(start: start, end: boundedEnd)
+    }
+
+    private func clearSharedUnlockEndedMarker() {
+        guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
+        sharedDefaults.removeObject(forKey: ScreenTimeConfig.unlockEndedAtKey)
+    }
+
+    private func ensureUnlockExpiryMonitorIsScheduled() {
+        guard let endDate = activeSessionPlannedEndDate else { return }
+        if let monitoredUnlockEndDate,
+           abs(monitoredUnlockEndDate.timeIntervalSince(endDate)) < 0.5 {
+            return
+        }
+        scheduleUnlockExpiryMonitor(until: endDate)
+    }
+
+    private func scheduleUnlockExpiryMonitor(until endDate: Date) {
+        let now = Date()
+        guard endDate > now else { return }
+
+        let cal = Calendar.current
+        // Give the monitor a tiny setup buffer; starting exactly "now" can race on short sessions.
+        let scheduleStart = now.addingTimeInterval(1)
+        let scheduleEnd = max(endDate, scheduleStart.addingTimeInterval(5))
+        let startComponents = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: scheduleStart)
+        let endComponents = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: scheduleEnd)
+        let warningComponents = DateComponents(second: 5)
+        let schedule = DeviceActivitySchedule(
+            intervalStart: startComponents,
+            intervalEnd: endComponents,
+            repeats: false,
+            warningTime: warningComponents
+        )
+
+        if startMonitor(schedule: schedule) {
+            monitoredUnlockEndDate = endDate
+            return
+        }
+
+        // Replace any stale monitor with the same name, then retry once.
+        deviceActivityCenter.stopMonitoring([ScreenTimeConfig.unlockActivityName])
+        if startMonitor(schedule: schedule) {
+            monitoredUnlockEndDate = endDate
+        } else {
+            // If scheduling still fails, in-app reconciliation runs while app is active.
+            monitoredUnlockEndDate = nil
+        }
+    }
+
+    private func stopUnlockExpiryMonitor() {
+        deviceActivityCenter.stopMonitoring([ScreenTimeConfig.unlockActivityName])
+        monitoredUnlockEndDate = nil
+    }
+
+    private func startMonitor(schedule: DeviceActivitySchedule) -> Bool {
+        do {
+            try deviceActivityCenter.startMonitoring(ScreenTimeConfig.unlockActivityName, during: schedule)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Fires ~30s before planned unlock end so the user can return if background re-lock is delayed.
+    private func scheduleUnlockThirtySecondWarningNotification() {
+        cancelUnlockThirtySecondWarningNotification()
+        guard let plannedEnd = activeSessionPlannedEndDate else { return }
+        let fireDate = plannedEnd.addingTimeInterval(-30)
+        let delay = fireDate.timeIntervalSinceNow
+        guard delay > 0.5 else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Unlock ending soon"
+        content.body = "You have 30 seconds left. Get back to work now."
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: Self.unlockThirtySecondWarningNotificationID,
+            content: content,
+            trigger: trigger
+        )
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            let ok: Bool
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                ok = true
+            case .notDetermined:
+                ok = (try? await center.requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+            default:
+                ok = false
+            }
+            guard ok else { return }
+            try? await center.add(request)
+        }
+    }
+
+    private func cancelUnlockThirtySecondWarningNotification() {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(
+            withIdentifiers: [Self.unlockThirtySecondWarningNotificationID]
+        )
     }
 
     // MARK: - Time calculations (today + streak)
@@ -395,8 +581,9 @@ final class PhoneLockStore: ObservableObject {
 
         // Active session contributes to whichever day it overlaps (important for cross-midnight sessions).
         if let start = activeSessionStartDate {
+            let activeEnd = activeSessionPlannedEndDate ?? now
             let overlapStart = max(start, dayStart)
-            let overlapEnd = min(now, dayEnd)
+            let overlapEnd = min(min(now, activeEnd), dayEnd)
             if overlapEnd > overlapStart {
                 total += overlapEnd.timeIntervalSince(overlapStart)
             }
@@ -665,10 +852,27 @@ struct ContentView: View {
                 .environmentObject(store)
             }
         }
+        .onAppear {
+            store.reconcileActiveUnlockIfNeeded()
+        }
         .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active else { return }
-            store.pruneExpiredNoneRepeatGoalsIfNeeded()
-            store.updateStreakIfNeeded()
+            if newPhase == .active {
+                store.reconcileActiveUnlockIfNeeded()
+                store.pruneExpiredNoneRepeatGoalsIfNeeded()
+                store.updateStreakIfNeeded()
+            } else {
+                // Re-apply immediately when transitioning away from active as a best-effort sync.
+                store.reconcileActiveUnlockIfNeeded()
+            }
+        }
+        .task {
+            // Keep unlock state authoritative even if the sticky view is not visible.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await MainActor.run {
+                    store.reconcileActiveUnlockIfNeeded()
+                }
+            }
         }
     }
 }

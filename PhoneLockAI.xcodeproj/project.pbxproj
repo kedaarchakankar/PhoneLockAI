@@ -7,11 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3F6A35562F75843C00BBA126 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3F6A35552F75843C00BBA126 /* DeviceActivity.framework */; };
+		3F6A355E2F75843C00BBA126 /* PhoneLock.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3F6A35532F75843C00BBA126 /* PhoneLock.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3F6A35642F75843C00BBA126 /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3F6A35682F75843C00BBA126 /* ManagedSettings.framework */; };
+		3F6A35662F75843C00BBA126 /* FamilyControls.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3F6A35652F75843C00BBA126 /* FamilyControls.framework */; };
 		4B1C2D3E4F5061728394A5B6 /* PhoneLockAI/ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A4F8C0E1D2C3B4A5E6F7081 /* PhoneLockAI/ContentView.swift */; };
 		4B1C2D3E4F5061728394A5B7 /* PhoneLockAI/PhoneLockAIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A4F8C0E1D2C3B4A5E6F7082 /* PhoneLockAI/PhoneLockAIApp.swift */; };
+		A7E8F9CC2F75843C00BBA126 /* PhoneLockShield.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A7E8F9C82F75843C00BBA126 /* PhoneLockShield.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A7E8F9CE2F75843C00BBA126 /* ManagedSettingsUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A7E8F9CD2F75843C00BBA126 /* ManagedSettingsUI.framework */; };
+		A7E8F9D12F75843C00BBA126 /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3F6A35682F75843C00BBA126 /* ManagedSettings.framework */; };
+		A7E8F9D22F75843C00BBA126 /* FamilyControls.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3F6A35652F75843C00BBA126 /* FamilyControls.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		3F6A355C2F75843C00BBA126 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3F8058732F6C568400DAEC70 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3F6A35522F75843C00BBA126;
+			remoteInfo = PhoneLock;
+		};
 		3F8058892F6C568600DAEC70 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3F8058732F6C568400DAEC70 /* Project object */;
@@ -26,17 +41,70 @@
 			remoteGlobalIDString = 3F80587A2F6C568400DAEC70;
 			remoteInfo = PhoneLockAI;
 		};
+		A7E8F9CA2F75843C00BBA126 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3F8058732F6C568400DAEC70 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A7E8F9C32F75843C00BBA126;
+			remoteInfo = PhoneLockShield;
+		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		3F6A355F2F75843C00BBA126 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				3F6A355E2F75843C00BBA126 /* PhoneLock.appex in Embed Foundation Extensions */,
+				A7E8F9CC2F75843C00BBA126 /* PhoneLockShield.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		3F6A35532F75843C00BBA126 /* PhoneLock.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PhoneLock.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		3F6A35552F75843C00BBA126 /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
+		3F6A35652F75843C00BBA126 /* FamilyControls.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FamilyControls.framework; path = System/Library/Frameworks/FamilyControls.framework; sourceTree = SDKROOT; };
+		3F6A35682F75843C00BBA126 /* ManagedSettings.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ManagedSettings.framework; path = System/Library/Frameworks/ManagedSettings.framework; sourceTree = SDKROOT; };
 		3F80587B2F6C568400DAEC70 /* PhoneLockAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhoneLockAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F8058882F6C568600DAEC70 /* PhoneLockAITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhoneLockAITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F8058922F6C568600DAEC70 /* PhoneLockAIUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhoneLockAIUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4A4F8C0E1D2C3B4A5E6F7081 /* PhoneLockAI/ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLockAI/ContentView.swift; sourceTree = SOURCE_ROOT; };
 		4A4F8C0E1D2C3B4A5E6F7082 /* PhoneLockAI/PhoneLockAIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLockAI/PhoneLockAIApp.swift; sourceTree = SOURCE_ROOT; };
+		A7E8F9C82F75843C00BBA126 /* PhoneLockShield.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PhoneLockShield.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A7E8F9CD2F75843C00BBA126 /* ManagedSettingsUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ManagedSettingsUI.framework; path = System/Library/Frameworks/ManagedSettingsUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		3F6A35622F75843C00BBA126 /* Exceptions for "PhoneLock" folder in "PhoneLock" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 3F6A35522F75843C00BBA126 /* PhoneLock */;
+		};
+		A7E8F9C92F75843C00BBA126 /* Exceptions for "PhoneLockShield" folder in "PhoneLockShield" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A7E8F9C32F75843C00BBA126 /* PhoneLockShield */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		3F6A35572F75843C00BBA126 /* PhoneLock */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3F6A35622F75843C00BBA126 /* Exceptions for "PhoneLock" folder in "PhoneLock" target */,
+			);
+			path = PhoneLock;
+			sourceTree = "<group>";
+		};
 		3F80587D2F6C568400DAEC70 /* PhoneLockAI */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = PhoneLockAI;
@@ -52,9 +120,27 @@
 			path = PhoneLockAIUITests;
 			sourceTree = "<group>";
 		};
+		A7E8F9C72F75843C00BBA126 /* PhoneLockShield */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A7E8F9C92F75843C00BBA126 /* Exceptions for "PhoneLockShield" folder in "PhoneLockShield" target */,
+			);
+			path = PhoneLockShield;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		3F6A35502F75843C00BBA126 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3F6A35562F75843C00BBA126 /* DeviceActivity.framework in Frameworks */,
+				3F6A35642F75843C00BBA126 /* ManagedSettings.framework in Frameworks */,
+				3F6A35662F75843C00BBA126 /* FamilyControls.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3F8058782F6C568400DAEC70 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -76,15 +162,39 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7E8F9C52F75843C00BBA126 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A7E8F9CE2F75843C00BBA126 /* ManagedSettingsUI.framework in Frameworks */,
+				A7E8F9D12F75843C00BBA126 /* ManagedSettings.framework in Frameworks */,
+				A7E8F9D22F75843C00BBA126 /* FamilyControls.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3F6A35542F75843C00BBA126 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				3F6A35552F75843C00BBA126 /* DeviceActivity.framework */,
+				A7E8F9CD2F75843C00BBA126 /* ManagedSettingsUI.framework */,
+				3F6A35682F75843C00BBA126 /* ManagedSettings.framework */,
+				3F6A35652F75843C00BBA126 /* FamilyControls.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		3F8058722F6C568400DAEC70 = {
 			isa = PBXGroup;
 			children = (
 				3F80587D2F6C568400DAEC70 /* PhoneLockAI */,
 				3F80588B2F6C568600DAEC70 /* PhoneLockAITests */,
 				3F8058952F6C568600DAEC70 /* PhoneLockAIUITests */,
+				A7E8F9C72F75843C00BBA126 /* PhoneLockShield */,
+				3F6A35572F75843C00BBA126 /* PhoneLock */,
+				3F6A35542F75843C00BBA126 /* Frameworks */,
 				3F80587C2F6C568400DAEC70 /* Products */,
 				3F8059652F6CA0E700DAEC70 /* Recovered References */,
 			);
@@ -96,6 +206,8 @@
 				3F80587B2F6C568400DAEC70 /* PhoneLockAI.app */,
 				3F8058882F6C568600DAEC70 /* PhoneLockAITests.xctest */,
 				3F8058922F6C568600DAEC70 /* PhoneLockAIUITests.xctest */,
+				3F6A35532F75843C00BBA126 /* PhoneLock.appex */,
+				A7E8F9C82F75843C00BBA126 /* PhoneLockShield.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -112,6 +224,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		3F6A35522F75843C00BBA126 /* PhoneLock */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3F6A35632F75843C00BBA126 /* Build configuration list for PBXNativeTarget "PhoneLock" */;
+			buildPhases = (
+				3F6A354F2F75843C00BBA126 /* Sources */,
+				3F6A35502F75843C00BBA126 /* Frameworks */,
+				3F6A35512F75843C00BBA126 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				3F6A35572F75843C00BBA126 /* PhoneLock */,
+			);
+			name = PhoneLock;
+			packageProductDependencies = (
+			);
+			productName = PhoneLock;
+			productReference = 3F6A35532F75843C00BBA126 /* PhoneLock.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		3F80587A2F6C568400DAEC70 /* PhoneLockAI */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3F80589C2F6C568600DAEC70 /* Build configuration list for PBXNativeTarget "PhoneLockAI" */;
@@ -119,10 +253,13 @@
 				3F8058772F6C568400DAEC70 /* Sources */,
 				3F8058782F6C568400DAEC70 /* Frameworks */,
 				3F8058792F6C568400DAEC70 /* Resources */,
+				3F6A355F2F75843C00BBA126 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				3F6A355D2F75843C00BBA126 /* PBXTargetDependency */,
+				A7E8F9CB2F75843C00BBA126 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				3F80587D2F6C568400DAEC70 /* PhoneLockAI */,
@@ -180,6 +317,28 @@
 			productReference = 3F8058922F6C568600DAEC70 /* PhoneLockAIUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A7E8F9C32F75843C00BBA126 /* PhoneLockShield */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7E8F9C22F75843C00BBA126 /* Build configuration list for PBXNativeTarget "PhoneLockShield" */;
+			buildPhases = (
+				A7E8F9C42F75843C00BBA126 /* Sources */,
+				A7E8F9C52F75843C00BBA126 /* Frameworks */,
+				A7E8F9C62F75843C00BBA126 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A7E8F9C72F75843C00BBA126 /* PhoneLockShield */,
+			);
+			name = PhoneLockShield;
+			packageProductDependencies = (
+			);
+			productName = PhoneLockShield;
+			productReference = A7E8F9C82F75843C00BBA126 /* PhoneLockShield.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -187,9 +346,12 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 1630;
+				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 1630;
 				TargetAttributes = {
+					3F6A35522F75843C00BBA126 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 					3F80587A2F6C568400DAEC70 = {
 						CreatedOnToolsVersion = 16.3;
 					};
@@ -200,6 +362,9 @@
 					3F8058912F6C568600DAEC70 = {
 						CreatedOnToolsVersion = 16.3;
 						TestTargetID = 3F80587A2F6C568400DAEC70;
+					};
+					A7E8F9C32F75843C00BBA126 = {
+						CreatedOnToolsVersion = 26.3;
 					};
 				};
 			};
@@ -220,11 +385,20 @@
 				3F80587A2F6C568400DAEC70 /* PhoneLockAI */,
 				3F8058872F6C568600DAEC70 /* PhoneLockAITests */,
 				3F8058912F6C568600DAEC70 /* PhoneLockAIUITests */,
+				3F6A35522F75843C00BBA126 /* PhoneLock */,
+				A7E8F9C32F75843C00BBA126 /* PhoneLockShield */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		3F6A35512F75843C00BBA126 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3F8058792F6C568400DAEC70 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -246,9 +420,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7E8F9C62F75843C00BBA126 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		3F6A354F2F75843C00BBA126 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3F8058772F6C568400DAEC70 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -272,9 +460,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7E8F9C42F75843C00BBA126 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		3F6A355D2F75843C00BBA126 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3F6A35522F75843C00BBA126 /* PhoneLock */;
+			targetProxy = 3F6A355C2F75843C00BBA126 /* PBXContainerItemProxy */;
+		};
 		3F80588A2F6C568600DAEC70 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 3F80587A2F6C568400DAEC70 /* PhoneLockAI */;
@@ -285,9 +485,74 @@
 			target = 3F80587A2F6C568400DAEC70 /* PhoneLockAI */;
 			targetProxy = 3F8058932F6C568600DAEC70 /* PBXContainerItemProxy */;
 		};
+		A7E8F9CB2F75843C00BBA126 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A7E8F9C32F75843C00BBA126 /* PhoneLockShield */;
+			targetProxy = A7E8F9CA2F75843C00BBA126 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		3F6A35602F75843C00BBA126 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhoneLock/PhoneLock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D39662MBWL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLock/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneLock;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = kedaar.PhoneLockAI.PhoneLock;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3F6A35612F75843C00BBA126 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhoneLock/PhoneLock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D39662MBWL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLock/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneLock;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = kedaar.PhoneLockAI.PhoneLock;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		3F80589A2F6C568600DAEC70 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -537,9 +802,78 @@
 			};
 			name = Release;
 		};
+		A7E8F9D32F75843C00BBA126 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhoneLockShield/PhoneLockShield.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D39662MBWL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLockShield/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneLockShield;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = kedaar.PhoneLockAI.PhoneLockShield;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A7E8F9D42F75843C00BBA126 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhoneLockShield/PhoneLockShield.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D39662MBWL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PhoneLockShield/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneLockShield;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = kedaar.PhoneLockAI.PhoneLockShield;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3F6A35632F75843C00BBA126 /* Build configuration list for PBXNativeTarget "PhoneLock" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3F6A35602F75843C00BBA126 /* Debug */,
+				3F6A35612F75843C00BBA126 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		3F8058762F6C568400DAEC70 /* Build configuration list for PBXProject "PhoneLockAI" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -572,6 +906,15 @@
 			buildConfigurations = (
 				3F8058A32F6C568600DAEC70 /* Debug */,
 				3F8058A42F6C568600DAEC70 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7E8F9C22F75843C00BBA126 /* Build configuration list for PBXNativeTarget "PhoneLockShield" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A7E8F9D32F75843C00BBA126 /* Debug */,
+				A7E8F9D42F75843C00BBA126 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
