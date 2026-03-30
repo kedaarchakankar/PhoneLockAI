@@ -47,7 +47,10 @@ struct Goal: Identifiable, Codable, Hashable {
     var weeklyAnchorWeekday: Int?
     /// Local start-of-day for which a non-repeating (`.none`) goal is valid; older goals without this field are backfilled on load.
     var nonRepeatingDayStart: Date?
+    /// For `.none` only: persistent completion for that single day.
     var isCompleted: Bool
+    /// For `.daily` / `.weekly`: completion applies only when this matches the calendar day being viewed (start-of-day).
+    var completedForDayStart: Date?
 
     init(
         id: UUID = UUID(),
@@ -57,7 +60,8 @@ struct Goal: Identifiable, Codable, Hashable {
         targetTime: Date? = nil,
         weeklyAnchorWeekday: Int? = nil,
         nonRepeatingDayStart: Date? = nil,
-        isCompleted: Bool = false
+        isCompleted: Bool = false,
+        completedForDayStart: Date? = nil
     ) {
         self.id = id
         self.text = text
@@ -73,6 +77,7 @@ struct Goal: Identifiable, Codable, Hashable {
             self.nonRepeatingDayStart = nil
         }
         self.isCompleted = isCompleted
+        self.completedForDayStart = completedForDayStart.map { cal.startOfDay(for: $0) }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -84,6 +89,7 @@ struct Goal: Identifiable, Codable, Hashable {
         case weeklyAnchorWeekday
         case nonRepeatingDayStart
         case isCompleted
+        case completedForDayStart
     }
 
     init(from decoder: Decoder) throws {
@@ -95,11 +101,22 @@ struct Goal: Identifiable, Codable, Hashable {
         self.targetTime = try container.decodeIfPresent(Date.self, forKey: .targetTime)
         self.weeklyAnchorWeekday = try container.decodeIfPresent(Int.self, forKey: .weeklyAnchorWeekday)
         self.nonRepeatingDayStart = try container.decodeIfPresent(Date.self, forKey: .nonRepeatingDayStart)
-        self.isCompleted = try container.decodeIfPresent(Bool.self, forKey: .isCompleted) ?? false
+        let legacyIsCompleted = try container.decodeIfPresent(Bool.self, forKey: .isCompleted) ?? false
+        var decodedDayStart = try container.decodeIfPresent(Date.self, forKey: .completedForDayStart).map { Calendar.current.startOfDay(for: $0) }
+
         if self.repeatFrequency != .none {
             self.nonRepeatingDayStart = nil
-        } else if let d = self.nonRepeatingDayStart {
-            self.nonRepeatingDayStart = Calendar.current.startOfDay(for: d)
+            if decodedDayStart == nil, legacyIsCompleted {
+                decodedDayStart = Calendar.current.startOfDay(for: Date())
+            }
+            self.completedForDayStart = decodedDayStart
+            self.isCompleted = false
+        } else {
+            if let d = self.nonRepeatingDayStart {
+                self.nonRepeatingDayStart = Calendar.current.startOfDay(for: d)
+            }
+            self.completedForDayStart = nil
+            self.isCompleted = legacyIsCompleted
         }
     }
 }
@@ -125,6 +142,32 @@ extension Goal {
     var isRepeating: Bool {
         repeatFrequency == .daily || repeatFrequency == .weekly
     }
+
+    /// Completion for the calendar day containing `day` (repeating goals only count for that day).
+    func isCompleted(on day: Date, calendar: Calendar = .current) -> Bool {
+        let dayStart = calendar.startOfDay(for: day)
+        switch repeatFrequency {
+        case .none:
+            return isCompleted
+        case .daily, .weekly:
+            guard let marked = completedForDayStart else { return false }
+            return calendar.startOfDay(for: marked) == dayStart
+        }
+    }
+
+    mutating func toggleCompletion(on day: Date, calendar: Calendar = .current) {
+        let dayStart = calendar.startOfDay(for: day)
+        switch repeatFrequency {
+        case .none:
+            isCompleted.toggle()
+        case .daily, .weekly:
+            if isCompleted(on: day, calendar: calendar) {
+                completedForDayStart = nil
+            } else {
+                completedForDayStart = dayStart
+            }
+        }
+    }
 }
 
 struct UnlockSessionRecord: Identifiable, Codable {
@@ -146,11 +189,32 @@ struct UnlockSessionRecord: Identifiable, Codable {
 @MainActor
 final class PhoneLockStore: ObservableObject {
     private enum ScreenTimeConfig {
-        static let unlockActivityName = DeviceActivityName("com.phonelockai.unlock.session")
+        /// Fixed names so each new schedule replaces the prior one; dynamic UUID names can leave orphan monitors.
+        static let unlockPrimaryActivity = DeviceActivityName("com.phonelockai.unlock.primary")
+        static let unlockFallbackActivity = DeviceActivityName("com.phonelockai.unlock.fallback")
         static let activeShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.active")
         static let legacyBaselineShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.baseline")
         static let sharedDefaultsSuite = "group.com.phonelockai.shared"
         static let unlockEndedAtKey = "pol_unlock_ended_at"
+        static let activeUnlockStateKey = "pol_active_unlock_state"
+        /// Persisted so app + extension can stop monitors after process restart (in-memory names are lost).
+        static let daMonitorPrimaryKey = "pol_da_unlock_primary"
+        static let daMonitorFallbackKey = "pol_da_unlock_fallback"
+        static let daLastStartErrorKey = "pol_da_last_start_error"
+        static let daLastStartErrorTimeKey = "pol_da_last_start_error_ts"
+        /// JSON mirror of blocked apps; extensions sometimes see stale/missing `UserDefaults` data — file is more reliable.
+        static let blockedSelectionFilename = "blocked_apps_selection.json"
+        static let extLastEventKey = "pol_ext_last_event"
+        static let extLastEventTimeKey = "pol_ext_last_event_ts"
+        static let extLastActivityKey = "pol_ext_last_activity"
+        /// `DeviceActivityCenter.startMonitoring` fails with `intervalTooShort` if the span is below this (empirically ~15m on iOS).
+        static let deviceActivityMinimumScheduleDuration: TimeInterval = 15 * 60
+    }
+
+    private struct ActiveUnlockState: Codable {
+        var startDate: Date
+        var durationSeconds: TimeInterval
+        var isEmergency: Bool
     }
 
     // User profile
@@ -182,7 +246,7 @@ final class PhoneLockStore: ObservableObject {
         didSet {
             persistBlockedAppsSelection()
             persistBlockedAppsSelectionToSharedDefaults()
-            applyBlockingPolicy()
+            reconcileActiveUnlockIfNeeded()
         }
     }
 
@@ -218,6 +282,8 @@ final class PhoneLockStore: ObservableObject {
         static let streakDays = "pol_streak_days"
         static let streakLastProcessedDayStart = "pol_streak_last_processed_day_start"
         static let blockedAppsSelection = "pol_blocked_apps_selection"
+        /// Legacy: active unlock was also written here; extension cannot clear this — caused stale "unlock active" after extension re-locked.
+        static let activeUnlockStateLegacy = "pol_active_unlock_state"
     }
 
     init() {
@@ -248,6 +314,8 @@ final class PhoneLockStore: ObservableObject {
         }
         self.goals = backfilledGoals
 
+        migrateLegacyActiveUnlockFromStandardIfNeeded()
+        restoreActiveUnlockStateIfNeeded()
         updateStreakIfNeeded()
         pruneExpiredNoneRepeatGoalsIfNeeded()
         Task {
@@ -255,7 +323,7 @@ final class PhoneLockStore: ObservableObject {
         }
         clearLegacyBaselineShieldStoreIfNeeded()
         persistBlockedAppsSelectionToSharedDefaults()
-        applyBlockingPolicy()
+        reconcileActiveUnlockIfNeeded()
     }
 
     var dailyLimitSeconds: Int {
@@ -315,7 +383,56 @@ final class PhoneLockStore: ObservableObject {
 
     private func persistBlockedAppsSelectionToSharedDefaults() {
         guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
-        Self.persistCodable(blockedAppsSelection, forKey: Keys.blockedAppsSelection, using: sharedDefaults)
+        do {
+            let data = try JSONEncoder().encode(blockedAppsSelection)
+            sharedDefaults.set(data, forKey: Keys.blockedAppsSelection)
+            if let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ScreenTimeConfig.sharedDefaultsSuite) {
+                let url = base.appendingPathComponent(ScreenTimeConfig.blockedSelectionFilename, isDirectory: false)
+                if blockedAppsSelection.applicationTokens.isEmpty {
+                    try? FileManager.default.removeItem(at: url)
+                } else {
+                    try data.write(to: url, options: .atomic)
+                }
+            }
+            sharedDefaults.synchronize()
+        } catch {
+            Self.persistCodable(blockedAppsSelection, forKey: Keys.blockedAppsSelection, using: sharedDefaults)
+        }
+    }
+
+    /// After backgrounding, `DeviceActivity` callbacks are opaque; rescheduling when active avoids “stuck” monitors.
+    func refreshUnlockMonitorAfterReturningToForeground() {
+        guard isUnlockActive else { return }
+        monitoredUnlockEndDate = nil
+        ensureUnlockExpiryMonitorIsScheduled()
+    }
+
+    func unlockDiagnosticsReport() -> String {
+        var lines: [String] = []
+        guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else {
+            return "App Group UserDefaults unavailable (check entitlements / reinstall)."
+        }
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ScreenTimeConfig.sharedDefaultsSuite)
+        let fileURL = container?.appendingPathComponent(ScreenTimeConfig.blockedSelectionFilename, isDirectory: false)
+        let fileOK = fileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        lines.append("App group container: \(container != nil ? "ok" : "missing")")
+        lines.append("blocked_apps_selection.json present: \(fileOK ? "yes" : "no")")
+        let udBytes = shared.data(forKey: Keys.blockedAppsSelection)?.count ?? 0
+        lines.append("Blocked apps data in UserDefaults: \(udBytes) bytes")
+        lines.append("Extension last event: \(shared.string(forKey: ScreenTimeConfig.extLastEventKey) ?? "—")")
+        if let ts = shared.object(forKey: ScreenTimeConfig.extLastEventTimeKey) as? Double {
+            lines.append("Extension event at: \(Date(timeIntervalSince1970: ts))")
+        }
+        if let act = shared.string(forKey: ScreenTimeConfig.extLastActivityKey), !act.isEmpty {
+            lines.append("Extension activity id: \(act)")
+        }
+        if let err = shared.string(forKey: ScreenTimeConfig.daLastStartErrorKey) {
+            lines.append("Last schedule error: \(err)")
+        }
+        lines.append("App thinks unlock active: \(isUnlockActive)")
+        lines.append("Monitor end cached: \(monitoredUnlockEndDate != nil)")
+        lines.append("DA min schedule padding: \(Int(ScreenTimeConfig.deviceActivityMinimumScheduleDuration / 60))m (short unlocks re-lock via intervalWillEndWarning)")
+        return lines.joined(separator: "\n")
     }
 
     /// Drops non-repeating (`.none`) goals after the local calendar day they belong to ends.
@@ -357,10 +474,11 @@ final class PhoneLockStore: ObservableObject {
         activeSessionIsEmergency = isEmergency
         activeSessionDurationSeconds = TimeInterval(max(1, durationMinutes) * 60)
         activeSessionStartDate = Date()
+        persistActiveUnlockState()
         clearSharedUnlockEndedMarker()
         ensureUnlockExpiryMonitorIsScheduled()
         scheduleUnlockThirtySecondWarningNotification()
-        applyBlockingPolicy()
+        reconcileActiveUnlockIfNeeded()
     }
 
     func endActiveUnlock() {
@@ -384,10 +502,11 @@ final class PhoneLockStore: ObservableObject {
         activeSessionStartDate = nil
         activeSessionIsEmergency = false
         activeSessionDurationSeconds = 5 * 60
+        clearPersistedActiveUnlockState()
         stopUnlockExpiryMonitor()
         cancelUnlockThirtySecondWarningNotification()
         clearSharedUnlockEndedMarker()
-        applyBlockingPolicy()
+        applyShieldForCurrentUnlockState()
     }
 
     func reconcileActiveUnlockIfNeeded(now: Date = Date()) {
@@ -395,7 +514,7 @@ final class PhoneLockStore: ObservableObject {
 
         guard let start = activeSessionStartDate,
               let plannedEnd = activeSessionPlannedEndDate else {
-            applyBlockingPolicy()
+            applyShieldForCurrentUnlockState()
             return
         }
 
@@ -403,7 +522,7 @@ final class PhoneLockStore: ObservableObject {
             endActiveUnlock(start: start, end: plannedEnd)
         } else {
             ensureUnlockExpiryMonitorIsScheduled()
-            applyBlockingPolicy()
+            applyShieldForCurrentUnlockState()
         }
     }
 
@@ -423,7 +542,8 @@ final class PhoneLockStore: ObservableObject {
         }
     }
 
-    private func applyBlockingPolicy() {
+    /// Applies `ManagedSettings` shield from current in-memory unlock + selection only. Does not read the extension marker.
+    private func applyShieldForCurrentUnlockState() {
         let selectedApps = blockedAppsSelection.applicationTokens
 
         if isUnlockActive || blockedAppsSelection.applicationTokens.isEmpty {
@@ -448,16 +568,100 @@ final class PhoneLockStore: ObservableObject {
             sharedDefaults.removeObject(forKey: ScreenTimeConfig.unlockEndedAtKey)
         }
 
-        guard let start = activeSessionStartDate else { return }
-        let markerDate = Date(timeIntervalSince1970: marker)
-        let plannedEnd = activeSessionPlannedEndDate ?? markerDate
-        let boundedEnd = min(max(start, markerDate), plannedEnd, now)
-        endActiveUnlock(start: start, end: boundedEnd)
+        if let start = activeSessionStartDate {
+            let markerDate = Date(timeIntervalSince1970: marker)
+            let plannedEnd = activeSessionPlannedEndDate ?? markerDate
+            let boundedEnd = min(max(start, markerDate), plannedEnd, now)
+            endActiveUnlock(start: start, end: boundedEnd)
+            return
+        }
+
+        // Extension re-locked while the app had no in-memory session (e.g. after relaunch). Do not drop the marker
+        // without syncing: otherwise stale standard/group state could think an unlock is still active.
+        clearPersistedActiveUnlockState()
+        applyShieldForCurrentUnlockState()
     }
 
     private func clearSharedUnlockEndedMarker() {
         guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
         sharedDefaults.removeObject(forKey: ScreenTimeConfig.unlockEndedAtKey)
+    }
+
+    private func persistActiveUnlockState() {
+        guard let startDate = activeSessionStartDate else {
+            clearPersistedActiveUnlockState()
+            return
+        }
+        let state = ActiveUnlockState(
+            startDate: startDate,
+            durationSeconds: activeSessionDurationSeconds,
+            isEmergency: activeSessionIsEmergency
+        )
+        // App group only — the extension clears this when the timer fires; standard defaults would stay stale forever.
+        if let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
+            Self.persistCodable(state, forKey: ScreenTimeConfig.activeUnlockStateKey, using: sharedDefaults)
+        }
+        defaults.removeObject(forKey: Keys.activeUnlockStateLegacy)
+    }
+
+    private func clearPersistedActiveUnlockState() {
+        defaults.removeObject(forKey: Keys.activeUnlockStateLegacy)
+        if let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
+            sharedDefaults.removeObject(forKey: ScreenTimeConfig.activeUnlockStateKey)
+        }
+    }
+
+    private func loadPersistedActiveUnlockState() -> ActiveUnlockState? {
+        guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite),
+              let sharedData = sharedDefaults.data(forKey: ScreenTimeConfig.activeUnlockStateKey),
+              let state = try? JSONDecoder().decode(ActiveUnlockState.self, from: sharedData) else {
+            return nil
+        }
+        return state
+    }
+
+    /// One-time migration from pre-fix builds that wrote active unlock to `UserDefaults.standard` (extension could not clear it).
+    private func migrateLegacyActiveUnlockFromStandardIfNeeded(now: Date = Date()) {
+        guard let data = defaults.data(forKey: Keys.activeUnlockStateLegacy),
+              let state = try? JSONDecoder().decode(ActiveUnlockState.self, from: data) else { return }
+
+        defaults.removeObject(forKey: Keys.activeUnlockStateLegacy)
+        let plannedEnd = state.startDate.addingTimeInterval(max(1, state.durationSeconds))
+
+        guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
+
+        if now < plannedEnd {
+            Self.persistCodable(state, forKey: ScreenTimeConfig.activeUnlockStateKey, using: shared)
+        } else {
+            let record = UnlockSessionRecord(
+                startDate: state.startDate,
+                endDate: plannedEnd,
+                isEmergency: state.isEmergency
+            )
+            sessionRecords.append(record)
+            lastUnlockedSessionID = record.id
+        }
+    }
+
+    private func restoreActiveUnlockStateIfNeeded(now: Date = Date()) {
+        guard let state = loadPersistedActiveUnlockState() else { return }
+        let plannedEnd = state.startDate.addingTimeInterval(max(1, state.durationSeconds))
+        if now < plannedEnd {
+            activeSessionStartDate = state.startDate
+            activeSessionDurationSeconds = state.durationSeconds
+            activeSessionIsEmergency = state.isEmergency
+            ensureUnlockExpiryMonitorIsScheduled()
+            return
+        }
+
+        let record = UnlockSessionRecord(
+            startDate: state.startDate,
+            endDate: plannedEnd,
+            isEmergency: state.isEmergency
+        )
+        sessionRecords.append(record)
+        lastUnlockedSessionID = record.id
+        clearPersistedActiveUnlockState()
     }
 
     private func ensureUnlockExpiryMonitorIsScheduled() {
@@ -469,49 +673,106 @@ final class PhoneLockStore: ObservableObject {
         scheduleUnlockExpiryMonitor(until: endDate)
     }
 
+    /// Builds a schedule that satisfies Apple's minimum interval length. Short unlocks use `warningTime` so `intervalWillEndWarning` fires at `desiredEnd`.
+    private func deviceActivitySchedule(scheduleStart: Date, desiredEnd: Date, calendar: Calendar) -> DeviceActivitySchedule {
+        let rawSpan = desiredEnd.timeIntervalSince(scheduleStart)
+        let paddedSpan = max(rawSpan, ScreenTimeConfig.deviceActivityMinimumScheduleDuration)
+        let intervalEnd = scheduleStart.addingTimeInterval(paddedSpan)
+        let startComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: scheduleStart)
+        let endComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: intervalEnd)
+        let warningTime: DateComponents?
+        if paddedSpan - rawSpan > 1 {
+            let secondsBeforeEnd = Int(round(paddedSpan - rawSpan))
+            warningTime = Self.warningDateComponents(secondsBeforeIntervalEnd: secondsBeforeEnd)
+        } else {
+            warningTime = nil
+        }
+        return DeviceActivitySchedule(
+            intervalStart: startComponents,
+            intervalEnd: endComponents,
+            repeats: false,
+            warningTime: warningTime
+        )
+    }
+
+    private static func warningDateComponents(secondsBeforeIntervalEnd: Int) -> DateComponents {
+        let s = max(1, secondsBeforeIntervalEnd)
+        var c = DateComponents()
+        c.hour = s / 3600
+        c.minute = (s % 3600) / 60
+        c.second = s % 60
+        return c
+    }
+
     private func scheduleUnlockExpiryMonitor(until endDate: Date) {
         let now = Date()
         guard endDate > now else { return }
 
         let cal = Calendar.current
-        // Give the monitor a tiny setup buffer; starting exactly "now" can race on short sessions.
-        let scheduleStart = now.addingTimeInterval(1)
-        let scheduleEnd = max(endDate, scheduleStart.addingTimeInterval(5))
-        let startComponents = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: scheduleStart)
-        let endComponents = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: scheduleEnd)
-        let warningComponents = DateComponents(second: 5)
-        let schedule = DeviceActivitySchedule(
-            intervalStart: startComponents,
-            intervalEnd: endComponents,
-            repeats: false,
-            warningTime: warningComponents
-        )
+        stopUnlockExpiryMonitor()
 
-        if startMonitor(schedule: schedule) {
+        let primaryName = ScreenTimeConfig.unlockPrimaryActivity
+        let fallbackName = ScreenTimeConfig.unlockFallbackActivity
+        let startOffsets: [TimeInterval] = [2, 5, 10]
+        for offset in startOffsets {
+            let scheduleStart = now.addingTimeInterval(offset)
+            guard endDate.timeIntervalSince(scheduleStart) > 1 else { continue }
+
+            let primarySchedule = deviceActivitySchedule(scheduleStart: scheduleStart, desiredEnd: endDate, calendar: cal)
+            guard startMonitor(named: primaryName, schedule: primarySchedule) else { continue }
+
+            let fallbackDesiredEnd = endDate.addingTimeInterval(90)
+            let fallbackSchedule = deviceActivitySchedule(scheduleStart: scheduleStart, desiredEnd: fallbackDesiredEnd, calendar: cal)
+            guard startMonitor(named: fallbackName, schedule: fallbackSchedule) else {
+                deviceActivityCenter.stopMonitoring([primaryName])
+                continue
+            }
             monitoredUnlockEndDate = endDate
+            persistFixedUnlockMonitorNamesToShared()
             return
         }
-
-        // Replace any stale monitor with the same name, then retry once.
-        deviceActivityCenter.stopMonitoring([ScreenTimeConfig.unlockActivityName])
-        if startMonitor(schedule: schedule) {
-            monitoredUnlockEndDate = endDate
-        } else {
-            // If scheduling still fails, in-app reconciliation runs while app is active.
-            monitoredUnlockEndDate = nil
-        }
-    }
-
-    private func stopUnlockExpiryMonitor() {
-        deviceActivityCenter.stopMonitoring([ScreenTimeConfig.unlockActivityName])
         monitoredUnlockEndDate = nil
     }
 
-    private func startMonitor(schedule: DeviceActivitySchedule) -> Bool {
+    private func persistFixedUnlockMonitorNamesToShared() {
+        guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
+        shared.set(ScreenTimeConfig.unlockPrimaryActivity.rawValue, forKey: ScreenTimeConfig.daMonitorPrimaryKey)
+        shared.set(ScreenTimeConfig.unlockFallbackActivity.rawValue, forKey: ScreenTimeConfig.daMonitorFallbackKey)
+    }
+
+    private func clearPersistedUnlockMonitorNamesFromShared() {
+        guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
+        shared.removeObject(forKey: ScreenTimeConfig.daMonitorPrimaryKey)
+        shared.removeObject(forKey: ScreenTimeConfig.daMonitorFallbackKey)
+    }
+
+    private func stopUnlockExpiryMonitor() {
+        var rawNames = Set<String>()
+        rawNames.insert(ScreenTimeConfig.unlockPrimaryActivity.rawValue)
+        rawNames.insert(ScreenTimeConfig.unlockFallbackActivity.rawValue)
+        if let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
+            if let p = shared.string(forKey: ScreenTimeConfig.daMonitorPrimaryKey) { rawNames.insert(p) }
+            if let f = shared.string(forKey: ScreenTimeConfig.daMonitorFallbackKey) { rawNames.insert(f) }
+        }
+        let names = rawNames.map { DeviceActivityName($0) }
+        deviceActivityCenter.stopMonitoring(names)
+        monitoredUnlockEndDate = nil
+        clearPersistedUnlockMonitorNamesFromShared()
+    }
+
+    private func startMonitor(named name: DeviceActivityName, schedule: DeviceActivitySchedule) -> Bool {
         do {
-            try deviceActivityCenter.startMonitoring(ScreenTimeConfig.unlockActivityName, during: schedule)
+            try deviceActivityCenter.startMonitoring(name, during: schedule)
+            if let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
+                shared.removeObject(forKey: ScreenTimeConfig.daLastStartErrorKey)
+                shared.removeObject(forKey: ScreenTimeConfig.daLastStartErrorTimeKey)
+            }
             return true
         } catch {
+            if let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
+                shared.set(String(describing: error), forKey: ScreenTimeConfig.daLastStartErrorKey)
+                shared.set(Date().timeIntervalSince1970, forKey: ScreenTimeConfig.daLastStartErrorTimeKey)
+            }
             return false
         }
     }
@@ -853,10 +1114,12 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            store.refreshUnlockMonitorAfterReturningToForeground()
             store.reconcileActiveUnlockIfNeeded()
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
+                store.refreshUnlockMonitorAfterReturningToForeground()
                 store.reconcileActiveUnlockIfNeeded()
                 store.pruneExpiredNoneRepeatGoalsIfNeeded()
                 store.updateStreakIfNeeded()
@@ -879,128 +1142,87 @@ struct ContentView: View {
 
 // MARK: - Screen 1) Onboarding
 
+private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
+    case gym
+    case readBook
+    case meditate
+    case journal
+    case bedOnTime
+    case wakeOnTime
+    case outside
+    case homework
+    case study
+    case makeBed
+    case instrument
+    case hug
+    case dailySchedule
+    case run
+    case walk
+    case steps
+    case cleanRoom
+    case eatHealthy
+    case trackCalories
+    case shower
+    case brushTeeth
+    case floss
+    case walkDog
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .gym: return "🏋️ Go to the gym"
+        case .readBook: return "📖 Read a book"
+        case .meditate: return "🧘 Meditate"
+        case .journal: return "📝 Journal"
+        case .bedOnTime: return "🛌 Go to bed on time"
+        case .wakeOnTime: return "⏰ Wake up on time"
+        case .outside: return "🌲 Go outside"
+        case .homework: return "📚 Do your homework"
+        case .study: return "🙇‍♂️ Study"
+        case .makeBed: return "🛏️ Make your bed"
+        case .instrument: return "🎸 Play an instrument"
+        case .hug: return "🫂 Hug a friend or loved one"
+        case .dailySchedule: return "🗓️ Write a daily schedule"
+        case .run: return "🏃 Go for a run"
+        case .walk: return "🚶‍♂️ Go for a walk"
+        case .steps: return "👣 Hit your step count goal"
+        case .cleanRoom: return "🧹 Clean your room"
+        case .eatHealthy: return "🥗 Eat Healthy"
+        case .trackCalories: return "🥪 Track your calories"
+        case .shower: return "🚿 Take a shower"
+        case .brushTeeth: return "🪥 Brush your teeth"
+        case .floss: return "🦷 Floss"
+        case .walkDog: return "🦮 Walk the dog"
+        }
+    }
+}
+
 struct OnboardingView: View {
     @ObservedObject var store: PhoneLockStore
     var onDone: () -> Void
 
-    @State private var newGoalText: String = ""
+    @State private var onboardingStep: Int = 0
+    @State private var selectedHabitIDs: Set<String> = []
     @State private var showingAppPicker = false
 
-    var canContinue: Bool {
-        store.dailyLimitSeconds > 0 && !store.goals.isEmpty && store.blockedAppCount > 0
+    private var canProceedFromStep1: Bool {
+        store.dailyLimitSeconds > 0 && store.blockedAppCount > 0
+    }
+
+    private var canFinishOnboarding: Bool {
+        !selectedHabitIDs.isEmpty
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("PhoneLockAI")
-                            .font(.title.bold())
-                        Text("Set your daily limit and goals. When you unlock distractions, you'll reflect first.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    GroupBox(label: Text("Daily Limit (hrs/mins)").font(.subheadline).foregroundStyle(.secondary)) {
-                        VStack(spacing: 12) {
-                            HStack {
-                                Stepper("\(store.dailyLimitHours) hrs", value: $store.dailyLimitHours, in: 0...23)
-                            }
-                            HStack {
-                                Stepper("\(store.dailyLimitMinutes) mins", value: $store.dailyLimitMinutes, in: 0...59, step: 5)
-                            }
-                        }
-                        .padding(.vertical, 6)
-                    }
-
-                    GroupBox(label: Text("Goals").font(.subheadline).foregroundStyle(.secondary)) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                TextField("Add a goal (e.g., 'Finish my study plan')", text: $newGoalText)
-                                    .textFieldStyle(.roundedBorder)
-                                Button {
-                                    let trimmed = newGoalText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    guard !trimmed.isEmpty else { return }
-                                    store.goals.append(Goal(text: trimmed))
-                                    newGoalText = ""
-                                } label: {
-                                    Text("Add")
-                                }
-                                .buttonStyle(.borderedProminent)
-                            }
-
-                            if store.goals.isEmpty {
-                                Text("Add at least one goal to continue.")
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(store.goals) { goal in
-                                    HStack {
-                                        Text(goal.text)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Button(role: .destructive) {
-                                            store.goals.removeAll { $0.id == goal.id }
-                                        } label: {
-                                            Image(systemName: "trash")
-                                        }
-                                        .buttonStyle(.borderless)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 6)
-                    }
-
-                    GroupBox(label: Text("Blocked Apps").font(.subheadline).foregroundStyle(.secondary)) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Choose the apps you want PhoneLockAI to block when you're locked.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-
-                            Button {
-                                showingAppPicker = true
-                            } label: {
-                                Text(store.blockedAppCount == 0 ? "Select Blocked Apps" : "Edit Blocked Apps (\(store.blockedAppCount))")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            if store.blockedAppCount == 0 {
-                                Text("Select at least one app to continue.")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(store.blockedAppTokens, id: \.self) { token in
-                                            Label(token)
-                                                .lineLimit(1)
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 6)
-                                                .background(.thinMaterial)
-                                                .clipShape(Capsule())
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 6)
-                    }
-
-                    Button {
-                        onDone()
-                    } label: {
-                        Text("Continue")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canContinue)
-                    .padding(.top, 8)
+            Group {
+                if onboardingStep == 0 {
+                    onboardingStep1
+                } else {
+                    onboardingStep2
                 }
-                .padding()
             }
-            .navigationTitle("Onboarding")
             .task {
                 await store.requestFamilyControlsAuthorizationIfNeeded()
             }
@@ -1009,6 +1231,156 @@ struct OnboardingView: View {
                 selection: $store.blockedAppsSelection
             )
         }
+    }
+
+    private var onboardingStep1: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("PhoneLockAI")
+                        .font(.title.bold())
+                    Text("Set your daily unlock limit and choose which apps to block. Next, you'll pick daily habits to work toward.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                GroupBox(label: Text("Daily Limit (hrs/mins)").font(.subheadline).foregroundStyle(.secondary)) {
+                    VStack(spacing: 12) {
+                        HStack {
+                            Stepper("\(store.dailyLimitHours) hrs", value: $store.dailyLimitHours, in: 0...23)
+                        }
+                        HStack {
+                            Stepper("\(store.dailyLimitMinutes) mins", value: $store.dailyLimitMinutes, in: 0...59, step: 5)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                GroupBox(label: Text("Blocked Apps").font(.subheadline).foregroundStyle(.secondary)) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Choose the apps you want PhoneLockAI to block when you're locked.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            showingAppPicker = true
+                        } label: {
+                            Text(store.blockedAppCount == 0 ? "Select Blocked Apps" : "Edit Blocked Apps (\(store.blockedAppCount))")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        if store.blockedAppCount == 0 {
+                            Text("Select at least one app to continue.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(store.blockedAppTokens, id: \.self) { token in
+                                        Label(token)
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(.thinMaterial)
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                Button {
+                    onboardingStep = 1
+                } label: {
+                    Text("Next")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canProceedFromStep1)
+                .padding(.top, 8)
+            }
+            .padding()
+        }
+        .navigationTitle("Onboarding")
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingStep2: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("What are some daily habits you'd like to implement?")
+                    .font(.title2.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("Tap the habits you want as daily goals. You can change them later from the home screen.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                LazyVStack(spacing: 10) {
+                    ForEach(OnboardingDailyHabit.allCases) { habit in
+                        let isOn = selectedHabitIDs.contains(habit.id)
+                        Button {
+                            if isOn {
+                                selectedHabitIDs.remove(habit.id)
+                            } else {
+                                selectedHabitIDs.insert(habit.id)
+                            }
+                        } label: {
+                            HStack(alignment: .center, spacing: 12) {
+                                Text(habit.title)
+                                    .font(.body)
+                                    .multilineTextAlignment(.leading)
+                                    .foregroundStyle(.primary)
+                                Spacer(minLength: 8)
+                                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundStyle(isOn ? Color.accentColor : .secondary)
+                            }
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 14)
+                            .background(isOn ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if selectedHabitIDs.isEmpty {
+                    Text("Select at least one habit to continue.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    applySelectedHabitsAsDailyGoals()
+                    onDone()
+                } label: {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canFinishOnboarding)
+                .padding(.top, 8)
+            }
+            .padding()
+        }
+        .navigationTitle("Daily habits")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Back") {
+                    onboardingStep = 0
+                }
+            }
+        }
+    }
+
+    private func applySelectedHabitsAsDailyGoals() {
+        let ordered = OnboardingDailyHabit.allCases.filter { selectedHabitIDs.contains($0.id) }
+        store.goals = ordered.map { Goal(text: $0.title, repeatFrequency: .daily) }
     }
 }
 
@@ -1196,7 +1568,7 @@ struct GoalsListView: View {
                             selectedGoalID = goal.id
                             showGoalActions = true
                         } label: {
-                            GoalRowView(text: goal.text, isCompleted: goal.isCompleted)
+                            GoalRowView(text: goal.text, isCompleted: goal.isCompleted(on: now))
                         }
                         .buttonStyle(.plain)
                     }
@@ -1223,7 +1595,7 @@ struct GoalsListView: View {
                     onEditGoal(goal)
                     selectedGoalID = nil
                 }
-                Button(goal.isCompleted ? "Mark as Incomplete" : "Mark as Complete") {
+                Button(goal.isCompleted(on: now) ? "Mark as Incomplete" : "Mark as Complete") {
                     toggleComplete(for: goal.id)
                 }
                 Button("Delete Goal", role: .destructive) {
@@ -1245,7 +1617,7 @@ struct GoalsListView: View {
     private func toggleComplete(for id: UUID) {
         guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
         var g = store.goals[idx]
-        g.isCompleted.toggle()
+        g.toggleCompletion(on: now)
         store.goals[idx] = g
     }
 }
@@ -1256,9 +1628,10 @@ struct AllGoalsView: View {
     let onEditGoal: (Goal) -> Void
     @State private var selectedGoalID: UUID?
     @State private var showGoalActions = false
+    @State private var now: Date = Date()
 
     private var listedGoals: [Goal] {
-        store.goalsForAllGoalsPage(now: Date())
+        store.goalsForAllGoalsPage(now: now)
     }
 
     var body: some View {
@@ -1277,7 +1650,7 @@ struct AllGoalsView: View {
                                 selectedGoalID = goal.id
                                 showGoalActions = true
                             } label: {
-                                GoalRowView(text: goal.text, isCompleted: goal.isCompleted)
+                                GoalRowView(text: goal.text, isCompleted: goal.isCompleted(on: now))
                             }
                             .buttonStyle(.plain)
                         }
@@ -1287,6 +1660,7 @@ struct AllGoalsView: View {
             .padding()
         }
         .navigationTitle("All Goals")
+        .onAppear { now = Date() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -1307,7 +1681,7 @@ struct AllGoalsView: View {
                     onEditGoal(goal)
                     selectedGoalID = nil
                 }
-                Button(goal.isCompleted ? "Mark as Incomplete" : "Mark as Complete") {
+                Button(goal.isCompleted(on: now) ? "Mark as Incomplete" : "Mark as Complete") {
                     toggleComplete(for: goal.id)
                 }
                 Button("Delete Goal", role: .destructive) {
@@ -1329,7 +1703,7 @@ struct AllGoalsView: View {
     private func toggleComplete(for id: UUID) {
         guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
         var g = store.goals[idx]
-        g.isCompleted.toggle()
+        g.toggleCompletion(on: now)
         store.goals[idx] = g
     }
 }
@@ -1820,8 +2194,37 @@ struct SettingsView: View {
                     onEmergencyUnlock: onEmergencyUnlock
                 )
             }
+            NavigationLink("Unlock diagnostics") {
+                UnlockDiagnosticsView(store: store)
+            }
         }
         .navigationTitle("Settings")
+    }
+}
+
+struct UnlockDiagnosticsView: View {
+    @ObservedObject var store: PhoneLockStore
+    @State private var report: String = ""
+
+    var body: some View {
+        ScrollView {
+            Text(report)
+                .font(.system(.footnote, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        }
+        .navigationTitle("Unlock diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Refresh") { refresh() }
+            }
+        }
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        report = store.unlockDiagnosticsReport()
     }
 }
 
@@ -2128,6 +2531,18 @@ struct AddGoalView: View {
                             )
                         )
                     case .edit(let original):
+                        let (savedIsCompleted, savedCompletedDay): (Bool, Date?) = {
+                            switch (original.repeatFrequency, repeatFrequency) {
+                            case (.none, .none):
+                                return (original.isCompleted, nil)
+                            case (_, .none):
+                                return (original.isCompleted(on: Date()), nil)
+                            case (.none, .daily), (.none, .weekly):
+                                return (false, nil)
+                            default:
+                                return (false, original.completedForDayStart)
+                            }
+                        }()
                         onSave(
                             Goal(
                                 id: original.id,
@@ -2137,7 +2552,8 @@ struct AddGoalView: View {
                                 targetTime: isTimed ? targetTime : nil,
                                 weeklyAnchorWeekday: resolvedWeeklyAnchorWeekday(original: original),
                                 nonRepeatingDayStart: repeatFrequency == .none ? original.nonRepeatingDayStart : nil,
-                                isCompleted: original.isCompleted
+                                isCompleted: savedIsCompleted,
+                                completedForDayStart: savedCompletedDay
                             )
                         )
                     }

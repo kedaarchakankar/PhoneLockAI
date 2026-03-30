@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>BACKEND_CHAT_URL</key>
-	<string></string>
+	<string>https://b845q2kuy1.execute-api.us-east-1.amazonaws.com/default/phonelockai-chat</string>
 	<key>CFBundleIcons</key>
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
