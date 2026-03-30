@@ -330,6 +330,28 @@ final class PhoneLockStore: ObservableObject {
         max(0, dailyLimitHours * 3600 + dailyLimitMinutes * 60)
     }
 
+    var emergencyUnlockMonthlyLimit: Int {
+        4
+    }
+
+    var emergencyUnlocksUsedThisMonth: Int {
+        let calendar = Calendar.current
+        let now = Date()
+        guard let monthInterval = calendar.dateInterval(of: .month, for: now) else { return 0 }
+        return sessionRecords.reduce(0) { count, record in
+            guard record.isEmergency else { return count }
+            return monthInterval.contains(record.startDate) ? count + 1 : count
+        }
+    }
+
+    var emergencyUnlocksRemainingThisMonth: Int {
+        max(0, emergencyUnlockMonthlyLimit - emergencyUnlocksUsedThisMonth)
+    }
+
+    var canStartEmergencyUnlock: Bool {
+        emergencyUnlockEnabled && !isUnlockActive && dailyLimitSeconds > 0 && emergencyUnlocksRemainingThisMonth > 0
+    }
+
     var activeSessionElapsedSeconds: TimeInterval {
         guard let start = activeSessionStartDate else { return 0 }
         return Date().timeIntervalSince(start)
@@ -479,6 +501,12 @@ final class PhoneLockStore: ObservableObject {
         ensureUnlockExpiryMonitorIsScheduled()
         scheduleUnlockThirtySecondWarningNotification()
         reconcileActiveUnlockIfNeeded()
+    }
+
+    func startEmergencyUnlockIfAllowed(durationMinutes: Int) {
+        guard canStartEmergencyUnlock else { return }
+        guard durationMinutes > 0 else { return }
+        startUnlock(durationMinutes: durationMinutes, isEmergency: true)
     }
 
     func endActiveUnlock() {
@@ -1071,8 +1099,9 @@ struct ContentView: View {
                         case .settings:
                             SettingsView(
                                 store: store,
-                                onEmergencyUnlock: {
-                                    store.startUnlock(durationMinutes: 5, isEmergency: true)
+                                onEmergencyUnlock: { durationMinutes in
+                                    guard store.canStartEmergencyUnlock else { return }
+                                    store.startEmergencyUnlockIfAllowed(durationMinutes: durationMinutes)
                                     navPath.removeAll()
                                 }
                             )
@@ -1114,12 +1143,10 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            store.refreshUnlockMonitorAfterReturningToForeground()
             store.reconcileActiveUnlockIfNeeded()
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
-                store.refreshUnlockMonitorAfterReturningToForeground()
                 store.reconcileActiveUnlockIfNeeded()
                 store.pruneExpiredNoneRepeatGoalsIfNeeded()
                 store.updateStreakIfNeeded()
@@ -1147,13 +1174,17 @@ private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
     case readBook
     case meditate
     case journal
+    case drinkWater
+    case sleepEnough
     case bedOnTime
     case wakeOnTime
     case outside
+    case sunlight
     case homework
     case study
     case makeBed
     case instrument
+    case puzzle
     case hug
     case dailySchedule
     case run
@@ -1166,6 +1197,9 @@ private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
     case brushTeeth
     case floss
     case walkDog
+    case noPhoneBeforeBed
+    case noPhoneWhileEating
+    case gratitude
 
     var id: String { rawValue }
 
@@ -1175,13 +1209,17 @@ private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
         case .readBook: return "📖 Read a book"
         case .meditate: return "🧘 Meditate"
         case .journal: return "📝 Journal"
+        case .drinkWater: return "💧 Drink enough water"
+        case .sleepEnough: return "😴 Get enough sleep"
         case .bedOnTime: return "🛌 Go to bed on time"
         case .wakeOnTime: return "⏰ Wake up on time"
         case .outside: return "🌲 Go outside"
+        case .sunlight: return "☀️ Get enough sunlight"
         case .homework: return "📚 Do your homework"
         case .study: return "🙇‍♂️ Study"
         case .makeBed: return "🛏️ Make your bed"
         case .instrument: return "🎸 Play an instrument"
+        case .puzzle: return "🧩 Work on a puzzle"
         case .hug: return "🫂 Hug a friend or loved one"
         case .dailySchedule: return "🗓️ Write a daily schedule"
         case .run: return "🏃 Go for a run"
@@ -1192,8 +1230,11 @@ private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
         case .trackCalories: return "🥪 Track your calories"
         case .shower: return "🚿 Take a shower"
         case .brushTeeth: return "🪥 Brush your teeth"
-        case .floss: return "🦷 Floss"
+        case .floss: return "🦷 Floss your teeth"
         case .walkDog: return "🦮 Walk the dog"
+        case .noPhoneBeforeBed: return "📵 No phone before bed"
+        case .noPhoneWhileEating: return "🍽️ No phone while eating"
+        case .gratitude: return "🙏 Practice Gratitude"
         }
     }
 }
@@ -1311,7 +1352,7 @@ struct OnboardingView: View {
     private var onboardingStep2: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("What are some daily habits you'd like to implement?")
+                Text("What are some daily habits you’d like to implement?")
                     .font(.title2.bold())
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1349,7 +1390,7 @@ struct OnboardingView: View {
                 }
 
                 if selectedHabitIDs.isEmpty {
-                    Text("Select at least one habit to continue.")
+                    Text("Select at least one habit to continue, or skip for now.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1364,6 +1405,14 @@ struct OnboardingView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canFinishOnboarding)
                 .padding(.top, 8)
+
+                Button {
+                    onDone()
+                } label: {
+                    Text("Skip")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
             .padding()
         }
@@ -1532,6 +1581,7 @@ struct GoalsListView: View {
     let onSeeAllGoals: () -> Void
     @State private var selectedGoalID: UUID?
     @State private var showGoalActions = false
+    @State private var celebratingGoalIDs: Set<UUID> = []
 
     private var todaysGoals: [Goal] {
         store.goalsForToday(now: now)
@@ -1564,13 +1614,21 @@ struct GoalsListView: View {
             } else {
                 VStack(spacing: 10) {
                     ForEach(todaysGoals) { goal in
-                        Button {
+                        GoalRowView(
+                            text: goal.text,
+                            isCompleted: goal.isCompleted(on: now),
+                            isCelebrating: celebratingGoalIDs.contains(goal.id),
+                            onToggleCompletion: {
+                                if toggleComplete(for: goal.id) {
+                                    triggerCelebration(for: goal.id)
+                                }
+                            }
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
                             selectedGoalID = goal.id
                             showGoalActions = true
-                        } label: {
-                            GoalRowView(text: goal.text, isCompleted: goal.isCompleted(on: now))
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -1596,7 +1654,9 @@ struct GoalsListView: View {
                     selectedGoalID = nil
                 }
                 Button(goal.isCompleted(on: now) ? "Mark as Incomplete" : "Mark as Complete") {
-                    toggleComplete(for: goal.id)
+                    if toggleComplete(for: goal.id) {
+                        triggerCelebration(for: goal.id)
+                    }
                 }
                 Button("Delete Goal", role: .destructive) {
                     store.goals.removeAll { $0.id == goal.id }
@@ -1614,11 +1674,20 @@ struct GoalsListView: View {
         return todaysGoals.first(where: { $0.id == selectedGoalID })
     }
 
-    private func toggleComplete(for id: UUID) {
-        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    private func toggleComplete(for id: UUID) -> Bool {
+        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return false }
         var g = store.goals[idx]
         g.toggleCompletion(on: now)
         store.goals[idx] = g
+        return g.isCompleted(on: now)
+    }
+
+    private func triggerCelebration(for id: UUID) {
+        celebratingGoalIDs.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            celebratingGoalIDs.remove(id)
+        }
     }
 }
 
@@ -1629,6 +1698,7 @@ struct AllGoalsView: View {
     @State private var selectedGoalID: UUID?
     @State private var showGoalActions = false
     @State private var now: Date = Date()
+    @State private var celebratingGoalIDs: Set<UUID> = []
 
     private var listedGoals: [Goal] {
         store.goalsForAllGoalsPage(now: now)
@@ -1646,13 +1716,21 @@ struct AllGoalsView: View {
                 } else {
                     VStack(spacing: 10) {
                         ForEach(listedGoals) { goal in
-                            Button {
+                            GoalRowView(
+                                text: goal.text,
+                                isCompleted: goal.isCompleted(on: now),
+                                isCelebrating: celebratingGoalIDs.contains(goal.id),
+                                onToggleCompletion: {
+                                    if toggleComplete(for: goal.id) {
+                                        triggerCelebration(for: goal.id)
+                                    }
+                                }
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
                                 selectedGoalID = goal.id
                                 showGoalActions = true
-                            } label: {
-                                GoalRowView(text: goal.text, isCompleted: goal.isCompleted(on: now))
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -1682,7 +1760,9 @@ struct AllGoalsView: View {
                     selectedGoalID = nil
                 }
                 Button(goal.isCompleted(on: now) ? "Mark as Incomplete" : "Mark as Complete") {
-                    toggleComplete(for: goal.id)
+                    if toggleComplete(for: goal.id) {
+                        triggerCelebration(for: goal.id)
+                    }
                 }
                 Button("Delete Goal", role: .destructive) {
                     store.goals.removeAll { $0.id == goal.id }
@@ -1700,35 +1780,91 @@ struct AllGoalsView: View {
         return listedGoals.first(where: { $0.id == selectedGoalID })
     }
 
-    private func toggleComplete(for id: UUID) {
-        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    private func toggleComplete(for id: UUID) -> Bool {
+        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return false }
         var g = store.goals[idx]
         g.toggleCompletion(on: now)
         store.goals[idx] = g
+        return g.isCompleted(on: now)
+    }
+
+    private func triggerCelebration(for id: UUID) {
+        celebratingGoalIDs.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            celebratingGoalIDs.remove(id)
+        }
     }
 }
 
 struct GoalRowView: View {
     let text: String
     let isCompleted: Bool
+    let isCelebrating: Bool
+    let onToggleCompletion: () -> Void
+    @State private var confettiProgress: CGFloat = 1
+    private let confettiColors: [Color] = [.yellow, .orange, .pink, .green, .blue, .purple]
 
     var body: some View {
         HStack {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 8))
-                .foregroundStyle(Color.accentColor)
+            Button {
+                onToggleCompletion()
+            } label: {
+                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isCompleted ? Color.green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isCompleted ? "Mark goal as incomplete" : "Mark goal as complete")
             Text(text)
                 .lineLimit(1)
             Spacer()
-            if isCompleted {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Color.green)
-            }
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .background(.thinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            GeometryReader { geo in
+                ZStack {
+                    ForEach(0..<14, id: \.self) { i in
+                        let angle = Angle(degrees: Double(-145 + (i * 18)))
+                        let distance = CGFloat(16 + (i % 5) * 8)
+                        let dx = cos(angle.radians) * distance * confettiProgress
+                        let dy = sin(angle.radians) * distance * confettiProgress + (confettiProgress * confettiProgress * 8)
+                        let size = CGFloat(3 + (i % 3))
+                        let rotation = Angle(degrees: Double(i * 24)) + .degrees(Double(confettiProgress * 300))
+
+                        Group {
+                            if i.isMultiple(of: 2) {
+                                RoundedRectangle(cornerRadius: 1.2, style: .continuous)
+                                    .fill(confettiColors[i % confettiColors.count])
+                                    .frame(width: size + 1, height: size)
+                            } else {
+                                Circle()
+                                    .fill(confettiColors[i % confettiColors.count])
+                                    .frame(width: size, height: size)
+                            }
+                        }
+                        .rotationEffect(rotation)
+                        .offset(x: dx, y: dy)
+                        .opacity(Double(1 - confettiProgress))
+                    }
+                }
+                .position(x: 18, y: geo.size.height / 2)
+            }
+            .allowsHitTesting(false)
+        }
+        .onChange(of: isCelebrating) { _, newValue in
+            guard newValue else {
+                confettiProgress = 1
+                return
+            }
+            confettiProgress = 0
+            withAnimation(.easeOut(duration: 0.55)) {
+                confettiProgress = 1
+            }
+        }
     }
 }
 
@@ -1784,6 +1920,7 @@ enum OpenAIError: LocalizedError {
     case missingBackendURL
     case badResponse
     case emptyResponse
+    case timeout
 
     var errorDescription: String? {
         switch self {
@@ -1793,6 +1930,8 @@ enum OpenAIError: LocalizedError {
             return "Backend request failed."
         case .emptyResponse:
             return "Backend returned an empty response."
+        case .timeout:
+            return "Request timed out."
         }
     }
 }
@@ -1861,8 +2000,10 @@ struct ChatUnlockView: View {
     @State private var isLoading: Bool = false
     @State private var errorText: String?
     @State private var unlockMinutes: Int?
+    @State private var fallbackUnlockCountdownSeconds: Int = 0
 
     private let openAI = OpenAIService()
+    private let chatFailureFallbackText = "An error has occoured. Use this quick 15 minute unlock"
 
     var body: some View {
         VStack(spacing: 12) {
@@ -1901,13 +2042,20 @@ struct ChatUnlockView: View {
             }
 
             if let minutes = unlockMinutes {
+                let isFallbackUnlock = (errorText == chatFailureFallbackText && minutes == 15)
                 Button {
                     onUnlock(minutes)
                 } label: {
-                    Text("Unlock for \(minutes) minutes")
-                        .frame(maxWidth: .infinity)
+                    if isFallbackUnlock && fallbackUnlockCountdownSeconds > 0 {
+                        Text("Unlock for \(minutes) minutes (\(fallbackUnlockCountdownSeconds)s)")
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Text("Unlock for \(minutes) minutes")
+                            .frame(maxWidth: .infinity)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(isFallbackUnlock && fallbackUnlockCountdownSeconds > 0)
                 .padding(.horizontal)
             }
 
@@ -1949,15 +2097,18 @@ struct ChatUnlockView: View {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         errorText = nil
+        unlockMinutes = nil
+        fallbackUnlockCountdownSeconds = 0
         inputText = ""
         messages.append(ChatMessage(role: .user, content: trimmed))
         isLoading = true
         defer { isLoading = false }
 
         do {
-            let assistantText = try await openAI.send(
+            let assistantText = try await sendMessageWithTimeout(
                 conversation: messages,
-                goals: store.goalsForToday().map(\.text)
+                goals: store.goalsForToday().map(\.text),
+                timeoutSeconds: 10
             )
             messages.append(ChatMessage(role: .assistant, content: assistantText))
             // Unlock button only when assistant uses the exact phrase from PhoneLockAI prompt.txt:
@@ -1968,7 +2119,42 @@ struct ChatUnlockView: View {
                 unlockMinutes = nil
             }
         } catch {
-            errorText = error.localizedDescription
+            errorText = chatFailureFallbackText
+            unlockMinutes = 15
+            startFallbackUnlockCountdown()
+        }
+    }
+
+    private func startFallbackUnlockCountdown() {
+        fallbackUnlockCountdownSeconds = 15
+        Task {
+            while fallbackUnlockCountdownSeconds > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard errorText == chatFailureFallbackText, unlockMinutes == 15 else { return }
+                fallbackUnlockCountdownSeconds -= 1
+            }
+        }
+    }
+
+    private func sendMessageWithTimeout(
+        conversation: [ChatMessage],
+        goals: [String],
+        timeoutSeconds: UInt64
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await openAI.send(conversation: conversation, goals: goals)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                throw OpenAIError.timeout
+            }
+
+            guard let first = try await group.next() else {
+                throw OpenAIError.badResponse
+            }
+            group.cancelAll()
+            return first
         }
     }
 
@@ -2172,7 +2358,7 @@ struct ActiveUnlockStickyView: View {
 
 struct SettingsView: View {
     @ObservedObject var store: PhoneLockStore
-    var onEmergencyUnlock: () -> Void
+    var onEmergencyUnlock: (_ durationMinutes: Int) -> Void
 
     var body: some View {
         List {
@@ -2296,26 +2482,54 @@ struct EditDailyLimitView: View {
 
 struct EmergencyUnlockSettingsView: View {
     @ObservedObject var store: PhoneLockStore
-    var onEmergencyUnlock: () -> Void
+    var onEmergencyUnlock: (_ durationMinutes: Int) -> Void
+    @State private var selectedHours: Int = 0
+    @State private var selectedMinutes: Int = 5
+
+    private var selectedTotalMinutes: Int {
+        selectedHours * 60 + selectedMinutes
+    }
 
     var body: some View {
         Form {
             Section {
-                Text("Emergency unlock starts a 5 minute unlock session and counts toward your limit.")
+                Text("Emergency unlock starts a temporary unlock session and counts toward your limit.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                Text("You only have a limited unspecified amount of these per month.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Unlock duration") {
+                HStack(spacing: 0) {
+                    Picker("Hours", selection: $selectedHours) {
+                        ForEach(0...23, id: \.self) { value in
+                            Text("\(value) hr").tag(value)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+
+                    Picker("Minutes", selection: $selectedMinutes) {
+                        ForEach(0...59, id: \.self) { value in
+                            Text("\(value) min").tag(value)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                }
+                .frame(height: 180)
             }
 
             Section {
                 Toggle("Enable Emergency Unlock", isOn: $store.emergencyUnlockEnabled)
                 Button {
-                    onEmergencyUnlock()
+                    onEmergencyUnlock(selectedTotalMinutes)
                 } label: {
-                    Text("Emergency Unlock (5 minutes)")
+                    Text("Emergency Unlock")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!store.emergencyUnlockEnabled || store.isUnlockActive || store.dailyLimitSeconds <= 0)
+                .disabled(!store.canStartEmergencyUnlock || selectedTotalMinutes <= 0)
             }
         }
         .navigationTitle("Emergency Unlock")
@@ -2325,6 +2539,7 @@ struct EmergencyUnlockSettingsView: View {
 struct EditBlockedAppsView: View {
     @ObservedObject var store: PhoneLockStore
     @State private var showingAppPicker = false
+    @State private var countdownSeconds: Int = 15
 
     var body: some View {
         List {
@@ -2349,12 +2564,26 @@ struct EditBlockedAppsView: View {
                 Button {
                     showingAppPicker = true
                 } label: {
-                    Text(store.blockedAppTokens.isEmpty ? "Select Blocked Apps" : "Edit Blocked Apps")
+                    if countdownSeconds > 0 {
+                        Text("Edit Blocked Apps (\(countdownSeconds)s)")
+                    } else {
+                        Text(store.blockedAppTokens.isEmpty ? "Select Blocked Apps" : "Edit Blocked Apps")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(countdownSeconds > 0)
             }
         }
         .navigationTitle("Edit Blocked Apps")
+        .onAppear {
+            countdownSeconds = 15
+        }
+        .task {
+            while countdownSeconds > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                countdownSeconds -= 1
+            }
+        }
         .task {
             await store.requestFamilyControlsAuthorizationIfNeeded()
         }
