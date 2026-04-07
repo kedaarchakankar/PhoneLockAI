@@ -11,9 +11,16 @@ import Foundation
 import ManagedSettings
 
 final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
+    private struct ActiveUnlockState: Codable {
+        let sessionID: String
+        let startDate: Date
+        let durationSeconds: TimeInterval
+        let isEmergency: Bool
+    }
+
     private enum ScreenTimeConfig {
-        static let unlockPrimaryActivity = DeviceActivityName("com.phonelockai.unlock.primary")
-        static let unlockFallbackActivity = DeviceActivityName("com.phonelockai.unlock.fallback")
+        static let unlockPrimaryActivityPrefix = "com.phonelockai.unlock.primary."
+        static let unlockFallbackActivityPrefix = "com.phonelockai.unlock.fallback."
         /// Legacy schedules from builds that used UUID-suffixed names.
         static let legacyPrimaryPrefix = "com.phonelockai.unlock.session."
         static let legacyFallbackPrefix = "com.phonelockai.unlock.session.fallback."
@@ -49,10 +56,27 @@ final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func isOurUnlockActivity(_ activity: DeviceActivityName) -> Bool {
         let raw = activity.rawValue
-        return activity == ScreenTimeConfig.unlockPrimaryActivity
-            || activity == ScreenTimeConfig.unlockFallbackActivity
+        return raw.hasPrefix(ScreenTimeConfig.unlockPrimaryActivityPrefix)
+            || raw.hasPrefix(ScreenTimeConfig.unlockFallbackActivityPrefix)
             || raw.hasPrefix(ScreenTimeConfig.legacyPrimaryPrefix)
             || raw.hasPrefix(ScreenTimeConfig.legacyFallbackPrefix)
+    }
+
+    private func extractSessionID(from activity: DeviceActivityName) -> String? {
+        let raw = activity.rawValue
+        if raw.hasPrefix(ScreenTimeConfig.unlockPrimaryActivityPrefix) {
+            return String(raw.dropFirst(ScreenTimeConfig.unlockPrimaryActivityPrefix.count))
+        }
+        if raw.hasPrefix(ScreenTimeConfig.unlockFallbackActivityPrefix) {
+            return String(raw.dropFirst(ScreenTimeConfig.unlockFallbackActivityPrefix.count))
+        }
+        if raw.hasPrefix(ScreenTimeConfig.legacyPrimaryPrefix) {
+            return String(raw.dropFirst(ScreenTimeConfig.legacyPrimaryPrefix.count))
+        }
+        if raw.hasPrefix(ScreenTimeConfig.legacyFallbackPrefix) {
+            return String(raw.dropFirst(ScreenTimeConfig.legacyFallbackPrefix.count))
+        }
+        return nil
     }
 
     private func recordExtensionDiag(defaults: UserDefaults, event: String, activity: DeviceActivityName) {
@@ -83,6 +107,16 @@ final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
         recordExtensionDiag(defaults: sharedDefaults, event: trigger, activity: activity)
 
+        // Ignore stale callbacks from prior sessions; only lock for the active unlock session.
+        if let data = sharedDefaults.data(forKey: ScreenTimeConfig.activeUnlockStateKey),
+           let active = try? JSONDecoder().decode(ActiveUnlockState.self, from: data),
+           let callbackSessionID = extractSessionID(from: activity) {
+            if callbackSessionID != active.sessionID {
+                recordExtensionDiag(defaults: sharedDefaults, event: "ignored_stale_session_callback", activity: activity)
+                return
+            }
+        }
+
         let activeStore = ManagedSettingsStore(named: ScreenTimeConfig.activeShieldStoreName)
         guard let selection = loadBlockedAppsSelection(sharedDefaults: sharedDefaults) else {
             recordExtensionDiag(defaults: sharedDefaults, event: "decode_fail", activity: activity)
@@ -96,13 +130,10 @@ final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         recordExtensionDiag(defaults: sharedDefaults, event: "shield_applied", activity: activity)
 
         let center = DeviceActivityCenter()
-        var toStop: [DeviceActivityName] = [
-            ScreenTimeConfig.unlockPrimaryActivity,
-            ScreenTimeConfig.unlockFallbackActivity
-        ]
-        let raw = activity.rawValue
-        if raw.hasPrefix(ScreenTimeConfig.legacyPrimaryPrefix) || raw.hasPrefix(ScreenTimeConfig.legacyFallbackPrefix) {
-            toStop.append(activity)
+        var toStop: [DeviceActivityName] = [activity]
+        if let sessionID = extractSessionID(from: activity), !sessionID.isEmpty {
+            toStop.append(DeviceActivityName(ScreenTimeConfig.unlockPrimaryActivityPrefix + sessionID))
+            toStop.append(DeviceActivityName(ScreenTimeConfig.unlockFallbackActivityPrefix + sessionID))
         }
         center.stopMonitoring(toStop)
         sharedDefaults.removeObject(forKey: ScreenTimeConfig.daMonitorPrimaryKey)

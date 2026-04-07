@@ -189,9 +189,8 @@ struct UnlockSessionRecord: Identifiable, Codable {
 @MainActor
 final class PhoneLockStore: ObservableObject {
     private enum ScreenTimeConfig {
-        /// Fixed names so each new schedule replaces the prior one; dynamic UUID names can leave orphan monitors.
-        static let unlockPrimaryActivity = DeviceActivityName("com.phonelockai.unlock.primary")
-        static let unlockFallbackActivity = DeviceActivityName("com.phonelockai.unlock.fallback")
+        static let unlockPrimaryActivityPrefix = "com.phonelockai.unlock.primary."
+        static let unlockFallbackActivityPrefix = "com.phonelockai.unlock.fallback."
         static let activeShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.active")
         static let legacyBaselineShieldStoreName = ManagedSettingsStore.Name("com.phonelockai.shield.baseline")
         static let sharedDefaultsSuite = "group.com.phonelockai.shared"
@@ -207,14 +206,38 @@ final class PhoneLockStore: ObservableObject {
         static let extLastEventKey = "pol_ext_last_event"
         static let extLastEventTimeKey = "pol_ext_last_event_ts"
         static let extLastActivityKey = "pol_ext_last_activity"
+        static let activeUnlockSessionIDKey = "pol_unlock_session_id"
         /// `DeviceActivityCenter.startMonitoring` fails with `intervalTooShort` if the span is below this (empirically ~15m on iOS).
         static let deviceActivityMinimumScheduleDuration: TimeInterval = 15 * 60
     }
 
     private struct ActiveUnlockState: Codable {
+        var sessionID: String
         var startDate: Date
         var durationSeconds: TimeInterval
         var isEmergency: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case sessionID
+            case startDate
+            case durationSeconds
+            case isEmergency
+        }
+
+        init(sessionID: String, startDate: Date, durationSeconds: TimeInterval, isEmergency: Bool) {
+            self.sessionID = sessionID
+            self.startDate = startDate
+            self.durationSeconds = durationSeconds
+            self.isEmergency = isEmergency
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.sessionID = try c.decodeIfPresent(String.self, forKey: .sessionID) ?? UUID().uuidString
+            self.startDate = try c.decode(Date.self, forKey: .startDate)
+            self.durationSeconds = try c.decode(TimeInterval.self, forKey: .durationSeconds)
+            self.isEmergency = try c.decode(Bool.self, forKey: .isEmergency)
+        }
     }
 
     // User profile
@@ -268,6 +291,7 @@ final class PhoneLockStore: ObservableObject {
     private let activeShieldStore = ManagedSettingsStore(named: ScreenTimeConfig.activeShieldStoreName)
     private let deviceActivityCenter = DeviceActivityCenter()
     private var monitoredUnlockEndDate: Date?
+    private var activeUnlockSessionID: String?
     private var lastStreakProcessedDayStart: Date? {
         didSet { persistStreakState() }
     }
@@ -496,6 +520,7 @@ final class PhoneLockStore: ObservableObject {
         activeSessionIsEmergency = isEmergency
         activeSessionDurationSeconds = TimeInterval(max(1, durationMinutes) * 60)
         activeSessionStartDate = Date()
+        activeUnlockSessionID = UUID().uuidString
         persistActiveUnlockState()
         clearSharedUnlockEndedMarker()
         ensureUnlockExpiryMonitorIsScheduled()
@@ -530,6 +555,7 @@ final class PhoneLockStore: ObservableObject {
         activeSessionStartDate = nil
         activeSessionIsEmergency = false
         activeSessionDurationSeconds = 5 * 60
+        activeUnlockSessionID = nil
         clearPersistedActiveUnlockState()
         stopUnlockExpiryMonitor()
         cancelUnlockThirtySecondWarningNotification()
@@ -567,6 +593,22 @@ final class PhoneLockStore: ObservableObject {
             try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
         } catch {
             // Keep onboarding/settings usable even if authorization is declined for now.
+        }
+    }
+
+    @discardableResult
+    func requestNotificationAuthorization() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .notDetermined:
+            return (try? await center.requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+        case .denied:
+            return false
+        @unknown default:
+            return false
         }
     }
 
@@ -621,6 +663,7 @@ final class PhoneLockStore: ObservableObject {
             return
         }
         let state = ActiveUnlockState(
+            sessionID: activeUnlockSessionID ?? UUID().uuidString,
             startDate: startDate,
             durationSeconds: activeSessionDurationSeconds,
             isEmergency: activeSessionIsEmergency
@@ -628,14 +671,17 @@ final class PhoneLockStore: ObservableObject {
         // App group only — the extension clears this when the timer fires; standard defaults would stay stale forever.
         if let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
             Self.persistCodable(state, forKey: ScreenTimeConfig.activeUnlockStateKey, using: sharedDefaults)
+            sharedDefaults.set(state.sessionID, forKey: ScreenTimeConfig.activeUnlockSessionIDKey)
         }
         defaults.removeObject(forKey: Keys.activeUnlockStateLegacy)
     }
 
     private func clearPersistedActiveUnlockState() {
+        activeUnlockSessionID = nil
         defaults.removeObject(forKey: Keys.activeUnlockStateLegacy)
         if let sharedDefaults = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
             sharedDefaults.removeObject(forKey: ScreenTimeConfig.activeUnlockStateKey)
+            sharedDefaults.removeObject(forKey: ScreenTimeConfig.activeUnlockSessionIDKey)
         }
     }
 
@@ -659,7 +705,14 @@ final class PhoneLockStore: ObservableObject {
         guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
 
         if now < plannedEnd {
-            Self.persistCodable(state, forKey: ScreenTimeConfig.activeUnlockStateKey, using: shared)
+            let migrated = ActiveUnlockState(
+                sessionID: UUID().uuidString,
+                startDate: state.startDate,
+                durationSeconds: state.durationSeconds,
+                isEmergency: state.isEmergency
+            )
+            activeUnlockSessionID = migrated.sessionID
+            Self.persistCodable(migrated, forKey: ScreenTimeConfig.activeUnlockStateKey, using: shared)
         } else {
             let record = UnlockSessionRecord(
                 startDate: state.startDate,
@@ -675,6 +728,7 @@ final class PhoneLockStore: ObservableObject {
         guard let state = loadPersistedActiveUnlockState() else { return }
         let plannedEnd = state.startDate.addingTimeInterval(max(1, state.durationSeconds))
         if now < plannedEnd {
+            activeUnlockSessionID = state.sessionID
             activeSessionStartDate = state.startDate
             activeSessionDurationSeconds = state.durationSeconds
             activeSessionIsEmergency = state.isEmergency
@@ -735,12 +789,13 @@ final class PhoneLockStore: ObservableObject {
     private func scheduleUnlockExpiryMonitor(until endDate: Date) {
         let now = Date()
         guard endDate > now else { return }
+        guard let sessionID = activeUnlockSessionID, !sessionID.isEmpty else { return }
 
         let cal = Calendar.current
         stopUnlockExpiryMonitor()
 
-        let primaryName = ScreenTimeConfig.unlockPrimaryActivity
-        let fallbackName = ScreenTimeConfig.unlockFallbackActivity
+        let primaryName = DeviceActivityName(ScreenTimeConfig.unlockPrimaryActivityPrefix + sessionID)
+        let fallbackName = DeviceActivityName(ScreenTimeConfig.unlockFallbackActivityPrefix + sessionID)
         let startOffsets: [TimeInterval] = [2, 5, 10]
         for offset in startOffsets {
             let scheduleStart = now.addingTimeInterval(offset)
@@ -756,16 +811,16 @@ final class PhoneLockStore: ObservableObject {
                 continue
             }
             monitoredUnlockEndDate = endDate
-            persistFixedUnlockMonitorNamesToShared()
+            persistFixedUnlockMonitorNamesToShared(primary: primaryName, fallback: fallbackName)
             return
         }
         monitoredUnlockEndDate = nil
     }
 
-    private func persistFixedUnlockMonitorNamesToShared() {
+    private func persistFixedUnlockMonitorNamesToShared(primary: DeviceActivityName, fallback: DeviceActivityName) {
         guard let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) else { return }
-        shared.set(ScreenTimeConfig.unlockPrimaryActivity.rawValue, forKey: ScreenTimeConfig.daMonitorPrimaryKey)
-        shared.set(ScreenTimeConfig.unlockFallbackActivity.rawValue, forKey: ScreenTimeConfig.daMonitorFallbackKey)
+        shared.set(primary.rawValue, forKey: ScreenTimeConfig.daMonitorPrimaryKey)
+        shared.set(fallback.rawValue, forKey: ScreenTimeConfig.daMonitorFallbackKey)
     }
 
     private func clearPersistedUnlockMonitorNamesFromShared() {
@@ -776,14 +831,14 @@ final class PhoneLockStore: ObservableObject {
 
     private func stopUnlockExpiryMonitor() {
         var rawNames = Set<String>()
-        rawNames.insert(ScreenTimeConfig.unlockPrimaryActivity.rawValue)
-        rawNames.insert(ScreenTimeConfig.unlockFallbackActivity.rawValue)
         if let shared = UserDefaults(suiteName: ScreenTimeConfig.sharedDefaultsSuite) {
             if let p = shared.string(forKey: ScreenTimeConfig.daMonitorPrimaryKey) { rawNames.insert(p) }
             if let f = shared.string(forKey: ScreenTimeConfig.daMonitorFallbackKey) { rawNames.insert(f) }
         }
         let names = rawNames.map { DeviceActivityName($0) }
-        deviceActivityCenter.stopMonitoring(names)
+        if !names.isEmpty {
+            deviceActivityCenter.stopMonitoring(names)
+        }
         monitoredUnlockEndDate = nil
         clearPersistedUnlockMonitorNamesFromShared()
     }
@@ -1021,7 +1076,8 @@ actor GoalReminderScheduler {
         case .authorized, .provisional, .ephemeral:
             return true
         case .notDetermined:
-            return try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            // Do not auto-prompt during onboarding/app startup.
+            return false
         case .denied:
             return false
         @unknown default:
@@ -1102,6 +1158,9 @@ struct ContentView: View {
                                 onEmergencyUnlock: { durationMinutes in
                                     guard store.canStartEmergencyUnlock else { return }
                                     store.startEmergencyUnlockIfAllowed(durationMinutes: durationMinutes)
+                                    navPath.removeAll()
+                                },
+                                onDailyLimitSaved: {
                                     navPath.removeAll()
                                 }
                             )
@@ -1239,13 +1298,101 @@ private enum OnboardingDailyHabit: String, CaseIterable, Identifiable {
     }
 }
 
+private enum OnboardingWhyLessPhone: String, CaseIterable, Identifiable {
+    case cantFocus
+    case wastingTime
+    case hurtingSleep
+    case distracted
+    case notProductive
+    case feelWorse
+    case bePresent
+    case controlHabits
+    case other
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cantFocus: return "🧠 I can’t focus on what matters"
+        case .wastingTime: return "⏰ I feel like I’m wasting time"
+        case .hurtingSleep: return "😴 It’s hurting my sleep"
+        case .distracted: return "😵 I feel distracted all the time"
+        case .notProductive: return "📉 I’m not being productive"
+        case .feelWorse: return "😔 I feel worse after using it"
+        case .bePresent: return "🧑‍🤝‍🧑 I want to be more present with people"
+        case .controlHabits: return "📵 I want more control over my habits"
+        case .other: return "Other"
+        }
+    }
+}
+
+private enum OnboardingPhoneStruggle: String, CaseIterable, Identifiable {
+    case pickupWithoutThinking
+    case scrollTooLong
+    case loseTrackOfTime
+    case checkDuringFocus
+    case lateAtNight
+    case firstThingMorning
+    case struggleToStop
+    case distractedByNotifications
+    case other
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .pickupWithoutThinking: return "📱 I pick up my phone without thinking"
+        case .scrollTooLong: return "🔁 I keep scrolling longer than I planned"
+        case .loseTrackOfTime: return "🕒 I lose track of time when I’m on my phone"
+        case .checkDuringFocus: return "🧠 I check my phone while trying to focus"
+        case .lateAtNight: return "🌙 I use my phone late at night"
+        case .firstThingMorning: return "⏰ I check my phone first thing in the morning"
+        case .struggleToStop: return "📵 I struggle to stop once I start using it"
+        case .distractedByNotifications: return "🔔 I get distracted by notifications"
+        case .other: return "Other"
+        }
+    }
+}
+
 struct OnboardingView: View {
     @ObservedObject var store: PhoneLockStore
     var onDone: () -> Void
 
     @State private var onboardingStep: Int = 0
+    @State private var selectedAge: Int = 22
+    @State private var selectedWhyIDs: Set<String> = []
+    @State private var hoursPerDay: Double = 5
+    @State private var hoursUnknown: Bool = false
+    @State private var selectedStruggleIDs: Set<String> = []
+    @State private var showProjectedYears: Bool = false
     @State private var selectedHabitIDs: Set<String> = []
     @State private var showingAppPicker = false
+
+    private var canProceedFromAgeStep: Bool {
+        (13...121).contains(selectedAge)
+    }
+
+    private var canProceedFromWhyStep: Bool {
+        !selectedWhyIDs.isEmpty
+    }
+
+    private var canProceedFromHoursStep: Bool {
+        hoursUnknown || (1...23).contains(Int(hoursPerDay.rounded()))
+    }
+
+    private var canProceedFromStrugglesStep: Bool {
+        !selectedStruggleIDs.isEmpty
+    }
+
+    private var effectiveHoursPerDay: Int {
+        hoursUnknown ? 5 : Int(hoursPerDay.rounded())
+    }
+
+    private var projectedYearsOnPhone: Int {
+        let remainingYears = max(0, 100 - selectedAge)
+        let projected = (Double(remainingYears) * Double(effectiveHoursPerDay)) / 24.0
+        return Int(ceil(projected))
+    }
 
     private var canProceedFromStep1: Bool {
         store.dailyLimitSeconds > 0 && store.blockedAppCount > 0
@@ -1258,20 +1405,500 @@ struct OnboardingView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if onboardingStep == 0 {
+                switch onboardingStep {
+                case 0:
+                    onboardingAgeStep
+                case 1:
+                    onboardingWhyStep
+                case 2:
+                    onboardingHoursStep
+                case 3:
+                    onboardingStrugglesStep
+                case 4:
+                    onboardingYearsProjectionStep
+                case 5:
+                    onboardingGoodNewsStep
+                case 6:
+                    onboardingPaymentStep
+                case 7:
+                    onboardingNotificationsPermissionStep
+                case 8:
+                    onboardingScreenTimePermissionStep
+                case 9:
                     onboardingStep1
-                } else {
+                default:
                     onboardingStep2
                 }
-            }
-            .task {
-                await store.requestFamilyControlsAuthorizationIfNeeded()
             }
             .familyActivityPicker(
                 isPresented: $showingAppPicker,
                 selection: $store.blockedAppsSelection
             )
+            .toolbar {
+                if onboardingStep > 0 {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Back") {
+                            onboardingStep = max(0, onboardingStep - 1)
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private var onboardingAgeStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("How old are you?")
+                .font(.title2.bold())
+
+            Picker("Age", selection: $selectedAge) {
+                ForEach(13...121, id: \.self) { age in
+                    Text("\(age)").tag(age)
+                }
+            }
+            .pickerStyle(.wheel)
+            .frame(maxWidth: .infinity)
+            .frame(height: 180)
+            .clipped()
+
+            Button {
+                onboardingStep = 1
+            } label: {
+                Text("Next")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canProceedFromAgeStep)
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .navigationTitle("Onboarding")
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingWhyStep: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Why do you want to spend less time on your phone?")
+                    .font(.title2.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+
+                LazyVStack(spacing: 10) {
+                    ForEach(OnboardingWhyLessPhone.allCases) { reason in
+                        onboardingMultiSelectRow(
+                            title: reason.title,
+                            isOn: selectedWhyIDs.contains(reason.id)
+                        ) {
+                            toggle(&selectedWhyIDs, id: reason.id)
+                        }
+                    }
+                }
+
+                Button {
+                    onboardingStep = 2
+                } label: {
+                    Text("Next")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canProceedFromWhyStep)
+                .padding(.top, 8)
+            }
+            .padding()
+        }
+        .navigationTitle("Motivation")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingHoursStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("How many hours a day do you spend on your phone?")
+                .font(.title2.bold())
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("\(Int(hoursPerDay.rounded())) hour\(Int(hoursPerDay.rounded()) == 1 ? "" : "s")")
+                    .font(.headline)
+                Slider(value: $hoursPerDay, in: 1...23, step: 1)
+                    .disabled(hoursUnknown)
+                    .opacity(hoursUnknown ? 0.45 : 1)
+            }
+            .padding(14)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            Button {
+                hoursUnknown.toggle()
+            } label: {
+                HStack {
+                    Text("I don’t know")
+                        .font(.body.weight(.semibold))
+                    Spacer()
+                }
+                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .background(hoursUnknown ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(hoursUnknown ? Color.accentColor : Color.clear, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onboardingStep = 3
+            } label: {
+                Text("Next")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canProceedFromHoursStep)
+            .padding(.top, 8)
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .navigationTitle("Screen time")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingStrugglesStep: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("In what ways do you struggle with spending time on your phone?")
+                    .font(.title2.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+
+                LazyVStack(spacing: 10) {
+                    ForEach(OnboardingPhoneStruggle.allCases) { struggle in
+                        onboardingMultiSelectRow(
+                            title: struggle.title,
+                            isOn: selectedStruggleIDs.contains(struggle.id)
+                        ) {
+                            toggle(&selectedStruggleIDs, id: struggle.id)
+                        }
+                    }
+                }
+
+                Button {
+                    onboardingStep = 4
+                } label: {
+                    Text("Next")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canProceedFromStrugglesStep)
+                .padding(.top, 8)
+            }
+            .padding()
+        }
+        .navigationTitle("Challenges")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingYearsProjectionStep: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Here’s how many years you’ll be spending on your phone:")
+                .font(.title2.bold())
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+
+            Group {
+                if showProjectedYears {
+                    Text("\(projectedYearsOnPhone) years")
+                        .font(.system(size: 48, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.accentColor)
+                } else {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                        Text("Calculating...")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 8)
+
+            Spacer(minLength: 0)
+
+            if showProjectedYears {
+                Text("But it doesn’t have to be like this...")
+                    .font(.system(.title3, design: .default).weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+
+            Button {
+                onboardingStep = 5
+            } label: {
+                Text("Next")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.bottom, 8)
+            .opacity(showProjectedYears ? 1 : 0)
+            .disabled(!showProjectedYears)
+        }
+        .padding()
+        .navigationTitle("Your projection")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .onAppear {
+            showProjectedYears = false
+            Task {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                await MainActor.run {
+                    showProjectedYears = true
+                }
+            }
+        }
+    }
+
+    private var onboardingGoodNewsStep: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                Spacer()
+                    .frame(height: geometry.size.height * 0.18)
+
+                Text("Here is the good news. With PhoneLockAI, you can get back all these years and live your life more mindfully!")
+                    .font(.system(size: 31, weight: .bold, design: .default))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer()
+                    .frame(height: geometry.size.height * 0.28)
+
+                Button {
+                    onboardingStep = 6
+                } label: {
+                    Text("Get started now")
+                        .font(.title2.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Spacer(minLength: geometry.size.height * 0.14)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding()
+        }
+        .navigationTitle("PhoneLockAI")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingPaymentStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Choose your plan")
+                .font(.title2.bold())
+
+            Text("Start with a 7 day free trial. Cancel anytime.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button {
+                onboardingStep = 7
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Monthly")
+                            .font(.headline.weight(.semibold))
+                        Spacer()
+                        Text("$4.99")
+                            .font(.title3.weight(.bold))
+                    }
+                    Text("7 day free trial, then $4.99 per month")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onboardingStep = 7
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Yearly")
+                            .font(.headline.weight(.semibold))
+                        Spacer()
+                        HStack(alignment: .firstTextBaseline, spacing: 2) {
+                            Text("$3.33")
+                                .font(.title3.weight(.bold))
+                            Text("/mo")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("7 day free trial, then $39.99 per year")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.accentColor.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.accentColor, lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .navigationTitle("Free Trial")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingNotificationsPermissionStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Spacer(minLength: 0)
+
+            Text("Stay on track with reminders")
+                .font(.title2.bold())
+
+            Text("Enable notifications so PhoneLockAI can remind you when your unlock session is ending and when goals are due.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                Task {
+                    _ = await store.requestNotificationAuthorization()
+                    await MainActor.run {
+                        onboardingStep = 8
+                    }
+                }
+            } label: {
+                Text("Allow notifications")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                onboardingStep = 8
+            } label: {
+                Text("Not now")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var onboardingScreenTimePermissionStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Spacer(minLength: 0)
+
+            Text("Enable Screen Time access")
+                .font(.title2.bold())
+
+            Text("This lets PhoneLockAI block selected apps until your unlock timer is active.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("When the iOS popup appears, tap Continue (left button).")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("“PhoneLockAI” Would Like to Access Screen Time")
+                            .font(.headline)
+                        Text("Providing access to Screen Time may allow it to see your activity data, restrict content, and limit app usage.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Text("Continue")
+                            .font(.body.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.secondary.opacity(0.16))
+                            .clipShape(Capsule())
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .stroke(Color.red, lineWidth: 2)
+                            )
+
+                        Text("Don’t Allow")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.accentColor)
+                            .clipShape(Capsule())
+                    }
+                    .padding(12)
+                }
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                )
+            }
+
+            Button {
+                Task {
+                    await store.requestFamilyControlsAuthorizationIfNeeded()
+                    await MainActor.run {
+                        onboardingStep = 9
+                    }
+                }
+            } label: {
+                Text("Open Screen Time prompt")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                onboardingStep = 9
+            } label: {
+                Text("Not now")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .navigationTitle("Screen Time")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
     }
 
     private var onboardingStep1: some View {
@@ -1334,7 +1961,7 @@ struct OnboardingView: View {
                 }
 
                 Button {
-                    onboardingStep = 1
+                    onboardingStep = 10
                 } label: {
                     Text("Next")
                         .frame(maxWidth: .infinity)
@@ -1418,12 +2045,33 @@ struct OnboardingView: View {
         }
         .navigationTitle("Daily habits")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Back") {
-                    onboardingStep = 0
-                }
+    }
+
+    private func onboardingMultiSelectRow(title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(title)
+                    .font(.body)
+                    .multilineTextAlignment(.leading)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.title2)
+                    .foregroundStyle(isOn ? Color.accentColor : .secondary)
             }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .background(isOn ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toggle(_ set: inout Set<String>, id: String) {
+        if set.contains(id) {
+            set.remove(id)
+        } else {
+            set.insert(id)
         }
     }
 
@@ -1698,7 +2346,6 @@ struct AllGoalsView: View {
     @State private var selectedGoalID: UUID?
     @State private var showGoalActions = false
     @State private var now: Date = Date()
-    @State private var celebratingGoalIDs: Set<UUID> = []
 
     private var listedGoals: [Goal] {
         store.goalsForAllGoalsPage(now: now)
@@ -1718,13 +2365,10 @@ struct AllGoalsView: View {
                         ForEach(listedGoals) { goal in
                             GoalRowView(
                                 text: goal.text,
-                                isCompleted: goal.isCompleted(on: now),
-                                isCelebrating: celebratingGoalIDs.contains(goal.id),
-                                onToggleCompletion: {
-                                    if toggleComplete(for: goal.id) {
-                                        triggerCelebration(for: goal.id)
-                                    }
-                                }
+                                showsCompletionControl: false,
+                                isCompleted: false,
+                                isCelebrating: false,
+                                onToggleCompletion: {}
                             )
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -1759,11 +2403,6 @@ struct AllGoalsView: View {
                     onEditGoal(goal)
                     selectedGoalID = nil
                 }
-                Button(goal.isCompleted(on: now) ? "Mark as Incomplete" : "Mark as Complete") {
-                    if toggleComplete(for: goal.id) {
-                        triggerCelebration(for: goal.id)
-                    }
-                }
                 Button("Delete Goal", role: .destructive) {
                     store.goals.removeAll { $0.id == goal.id }
                     selectedGoalID = nil
@@ -1779,26 +2418,11 @@ struct AllGoalsView: View {
         guard let selectedGoalID else { return nil }
         return listedGoals.first(where: { $0.id == selectedGoalID })
     }
-
-    @discardableResult
-    private func toggleComplete(for id: UUID) -> Bool {
-        guard let idx = store.goals.firstIndex(where: { $0.id == id }) else { return false }
-        var g = store.goals[idx]
-        g.toggleCompletion(on: now)
-        store.goals[idx] = g
-        return g.isCompleted(on: now)
-    }
-
-    private func triggerCelebration(for id: UUID) {
-        celebratingGoalIDs.insert(id)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            celebratingGoalIDs.remove(id)
-        }
-    }
 }
 
 struct GoalRowView: View {
     let text: String
+    var showsCompletionControl: Bool = true
     let isCompleted: Bool
     let isCelebrating: Bool
     let onToggleCompletion: () -> Void
@@ -1806,16 +2430,18 @@ struct GoalRowView: View {
     private let confettiColors: [Color] = [.yellow, .orange, .pink, .green, .blue, .purple]
 
     var body: some View {
-        HStack {
-            Button {
-                onToggleCompletion()
-            } label: {
-                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(isCompleted ? Color.green : .secondary)
+        HStack(alignment: .center, spacing: 12) {
+            if showsCompletionControl {
+                Button {
+                    onToggleCompletion()
+                } label: {
+                    Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(isCompleted ? Color.green : .secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isCompleted ? "Mark goal as incomplete" : "Mark goal as complete")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isCompleted ? "Mark goal as incomplete" : "Mark goal as complete")
             Text(text)
                 .lineLimit(1)
             Spacer()
@@ -1825,37 +2451,40 @@ struct GoalRowView: View {
         .background(.thinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            GeometryReader { geo in
-                ZStack {
-                    ForEach(0..<14, id: \.self) { i in
-                        let angle = Angle(degrees: Double(-145 + (i * 18)))
-                        let distance = CGFloat(16 + (i % 5) * 8)
-                        let dx = cos(angle.radians) * distance * confettiProgress
-                        let dy = sin(angle.radians) * distance * confettiProgress + (confettiProgress * confettiProgress * 8)
-                        let size = CGFloat(3 + (i % 3))
-                        let rotation = Angle(degrees: Double(i * 24)) + .degrees(Double(confettiProgress * 300))
+            if showsCompletionControl {
+                GeometryReader { geo in
+                    ZStack {
+                        ForEach(0..<14, id: \.self) { i in
+                            let angle = Angle(degrees: Double(-145 + (i * 18)))
+                            let distance = CGFloat(16 + (i % 5) * 8)
+                            let dx = cos(angle.radians) * distance * confettiProgress
+                            let dy = sin(angle.radians) * distance * confettiProgress + (confettiProgress * confettiProgress * 8)
+                            let size = CGFloat(3 + (i % 3))
+                            let rotation = Angle(degrees: Double(i * 24)) + .degrees(Double(confettiProgress * 300))
 
-                        Group {
-                            if i.isMultiple(of: 2) {
-                                RoundedRectangle(cornerRadius: 1.2, style: .continuous)
-                                    .fill(confettiColors[i % confettiColors.count])
-                                    .frame(width: size + 1, height: size)
-                            } else {
-                                Circle()
-                                    .fill(confettiColors[i % confettiColors.count])
-                                    .frame(width: size, height: size)
+                            Group {
+                                if i.isMultiple(of: 2) {
+                                    RoundedRectangle(cornerRadius: 1.2, style: .continuous)
+                                        .fill(confettiColors[i % confettiColors.count])
+                                        .frame(width: size + 1, height: size)
+                                } else {
+                                    Circle()
+                                        .fill(confettiColors[i % confettiColors.count])
+                                        .frame(width: size, height: size)
+                                }
                             }
+                            .rotationEffect(rotation)
+                            .offset(x: dx, y: dy)
+                            .opacity(Double(1 - confettiProgress))
                         }
-                        .rotationEffect(rotation)
-                        .offset(x: dx, y: dy)
-                        .opacity(Double(1 - confettiProgress))
                     }
+                    .position(x: 18, y: geo.size.height / 2)
                 }
-                .position(x: 18, y: geo.size.height / 2)
+                .allowsHitTesting(false)
             }
-            .allowsHitTesting(false)
         }
         .onChange(of: isCelebrating) { _, newValue in
+            guard showsCompletionControl else { return }
             guard newValue else {
                 confettiProgress = 1
                 return
@@ -2359,6 +2988,7 @@ struct ActiveUnlockStickyView: View {
 struct SettingsView: View {
     @ObservedObject var store: PhoneLockStore
     var onEmergencyUnlock: (_ durationMinutes: Int) -> Void
+    var onDailyLimitSaved: () -> Void
 
     var body: some View {
         List {
@@ -2366,7 +2996,7 @@ struct SettingsView: View {
                 MyAccountView()
             }
             NavigationLink("Edit Daily Limit") {
-                EditDailyLimitView(store: store)
+                EditDailyLimitView(store: store, onSaved: onDailyLimitSaved)
             }
             NavigationLink("Edit Blocked Apps") {
                 EditBlockedAppsView(store: store)
@@ -2416,6 +3046,7 @@ struct UnlockDiagnosticsView: View {
 
 struct EditDailyLimitView: View {
     @ObservedObject var store: PhoneLockStore
+    var onSaved: () -> Void
     @State private var draftHours: Int = 0
     @State private var draftMinutes: Int = 0
     @State private var countdownSeconds: Int = 15
@@ -2450,6 +3081,7 @@ struct EditDailyLimitView: View {
                 guard countdownSeconds == 0 else { return }
                 store.dailyLimitHours = draftHours
                 store.dailyLimitMinutes = draftMinutes
+                onSaved()
             } label: {
                 if countdownSeconds > 0 {
                     Text("Think Before You Change Your Limit (\(countdownSeconds)s)")
