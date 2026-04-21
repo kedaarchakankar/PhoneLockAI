@@ -123,8 +123,13 @@ final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        let tokens = selection.applicationTokens
-        activeStore.shield.applications = tokens.isEmpty ? nil : tokens
+        let appTokens = selection.applicationTokens
+        activeStore.shield.applications = appTokens.isEmpty ? nil : appTokens
+        if selection.categoryTokens.isEmpty {
+            activeStore.shield.applicationCategories = nil
+        } else {
+            activeStore.shield.applicationCategories = .specific(selection.categoryTokens, except: [])
+        }
         sharedDefaults.set(Date().timeIntervalSince1970, forKey: ScreenTimeConfig.unlockEndedAtKey)
         sharedDefaults.removeObject(forKey: ScreenTimeConfig.activeUnlockStateKey)
         recordExtensionDiag(defaults: sharedDefaults, event: "shield_applied", activity: activity)

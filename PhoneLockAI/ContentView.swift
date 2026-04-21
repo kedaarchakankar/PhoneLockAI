@@ -320,7 +320,9 @@ final class PhoneLockStore: ObservableObject {
         self.emergencyUnlockEnabled = defaults.object(forKey: Keys.emergencyEnabled) == nil ? true : defaults.bool(forKey: Keys.emergencyEnabled)
         self.sessionRecords = storedSessions
         self.streakDays = defaults.integer(forKey: Keys.streakDays)
-        self.blockedAppsSelection = Self.loadCodable(forKey: Keys.blockedAppsSelection, as: FamilyActivitySelection.self) ?? FamilyActivitySelection()
+        self.blockedAppsSelection = Self.normalizedPickerSelection(
+            Self.loadCodable(forKey: Keys.blockedAppsSelection, as: FamilyActivitySelection.self) ?? FamilyActivitySelection()
+        )
         if defaults.object(forKey: Keys.streakLastProcessedDayStart) != nil {
             let ts = defaults.double(forKey: Keys.streakLastProcessedDayStart)
             self.lastStreakProcessedDayStart = Date(timeIntervalSince1970: ts)
@@ -434,7 +436,7 @@ final class PhoneLockStore: ObservableObject {
             sharedDefaults.set(data, forKey: Keys.blockedAppsSelection)
             if let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ScreenTimeConfig.sharedDefaultsSuite) {
                 let url = base.appendingPathComponent(ScreenTimeConfig.blockedSelectionFilename, isDirectory: false)
-                if blockedAppsSelection.applicationTokens.isEmpty {
+                if blockedAppCount == 0 {
                     try? FileManager.default.removeItem(at: url)
                 } else {
                     try data.write(to: url, options: .atomic)
@@ -582,10 +584,28 @@ final class PhoneLockStore: ObservableObject {
 
     var blockedAppCount: Int {
         blockedAppsSelection.applicationTokens.count
+            + blockedAppsSelection.categoryTokens.count
+            + blockedAppsSelection.webDomainTokens.count
     }
 
     var blockedAppTokens: [ApplicationToken] {
         Array(blockedAppsSelection.applicationTokens).sorted { "\($0)" < "\($1)" }
+    }
+
+    /// When `true`, choosing a category in `FamilyActivityPicker` fills `applicationTokens` with every app in that category (opaque tokens; no manual expansion API exists).
+    private static func normalizedPickerSelection(_ selection: FamilyActivitySelection) -> FamilyActivitySelection {
+        var s = FamilyActivitySelection(includeEntireCategory: true)
+        s.applicationTokens = selection.applicationTokens
+        s.categoryTokens = selection.categoryTokens
+        s.webDomainTokens = selection.webDomainTokens
+        return s
+    }
+
+    func blockedAppsSelectionPickerBinding() -> Binding<FamilyActivitySelection> {
+        Binding(
+            get: { self.blockedAppsSelection },
+            set: { self.blockedAppsSelection = Self.normalizedPickerSelection($0) }
+        )
     }
 
     func requestFamilyControlsAuthorizationIfNeeded() async {
@@ -614,18 +634,26 @@ final class PhoneLockStore: ObservableObject {
 
     /// Applies `ManagedSettings` shield from current in-memory unlock + selection only. Does not read the extension marker.
     private func applyShieldForCurrentUnlockState() {
-        let selectedApps = blockedAppsSelection.applicationTokens
+        let selection = blockedAppsSelection
+        let selectedApps = selection.applicationTokens
+        let hasCategoryShield = !selection.categoryTokens.isEmpty
+        let nothingToShieldWhenLocked = selectedApps.isEmpty && !hasCategoryShield
 
-        if isUnlockActive || blockedAppsSelection.applicationTokens.isEmpty {
+        if isUnlockActive || nothingToShieldWhenLocked {
             activeShieldStore.shield.applications = nil
+            activeShieldStore.shield.applicationCategories = nil
             return
         }
-        activeShieldStore.shield.applications = selectedApps
+        activeShieldStore.shield.applications = selectedApps.isEmpty ? nil : selectedApps
+        activeShieldStore.shield.applicationCategories = hasCategoryShield
+            ? .specific(selection.categoryTokens, except: [])
+            : nil
     }
 
     private func clearLegacyBaselineShieldStoreIfNeeded() {
         let legacyStore = ManagedSettingsStore(named: ScreenTimeConfig.legacyBaselineShieldStoreName)
         legacyStore.shield.applications = nil
+        legacyStore.shield.applicationCategories = nil
     }
 
     private func reconcileFromSharedUnlockEndedMarker(now: Date) {
@@ -1394,8 +1422,12 @@ struct OnboardingView: View {
         return Int(ceil(projected))
     }
 
-    private var canProceedFromStep1: Bool {
-        store.dailyLimitSeconds > 0 && store.blockedAppCount > 0
+    private var canProceedFromTimeLimitStep: Bool {
+        store.dailyLimitSeconds > 0
+    }
+
+    private var canProceedFromBlockedAppsStep: Bool {
+        store.blockedAppCount > 0
     }
 
     private var canFinishOnboarding: Bool {
@@ -1425,15 +1457,13 @@ struct OnboardingView: View {
                 case 8:
                     onboardingScreenTimePermissionStep
                 case 9:
-                    onboardingStep1
+                    onboardingTimeLimitStep
+                case 10:
+                    onboardingBlockedAppsStep
                 default:
-                    onboardingStep2
+                    onboardingHabitsStep
                 }
             }
-            .familyActivityPicker(
-                isPresented: $showingAppPicker,
-                selection: $store.blockedAppsSelection
-            )
             .toolbar {
                 if onboardingStep > 0 {
                     ToolbarItem(placement: .topBarLeading) {
@@ -1880,18 +1910,13 @@ struct OnboardingView: View {
                     }
                 }
             } label: {
-                Text("Open Screen Time prompt")
+                Text("Continue")
+                    .font(.title3.weight(.semibold))
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
             }
             .buttonStyle(.borderedProminent)
-
-            Button {
-                onboardingStep = 9
-            } label: {
-                Text("Not now")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
+            .controlSize(.large)
 
             Spacer(minLength: 0)
         }
@@ -1901,13 +1926,13 @@ struct OnboardingView: View {
         .navigationBarBackButtonHidden(true)
     }
 
-    private var onboardingStep1: some View {
+    private var onboardingTimeLimitStep: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("PhoneLockAI")
                         .font(.title.bold())
-                    Text("Set your daily unlock limit and choose which apps to block. Next, you'll pick daily habits to work toward.")
+                    Text("Set how much time you can unlock your phone each day. On the next screen, you’ll choose which apps to block when you’re locked.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -1924,40 +1949,10 @@ struct OnboardingView: View {
                     .padding(.vertical, 6)
                 }
 
-                GroupBox(label: Text("Blocked Apps").font(.subheadline).foregroundStyle(.secondary)) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Choose the apps you want PhoneLockAI to block when you're locked.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-
-                        Button {
-                            showingAppPicker = true
-                        } label: {
-                            Text(store.blockedAppCount == 0 ? "Select Blocked Apps" : "Edit Blocked Apps (\(store.blockedAppCount))")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        if store.blockedAppCount == 0 {
-                            Text("Select at least one app to continue.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(store.blockedAppTokens, id: \.self) { token in
-                                        Label(token)
-                                            .lineLimit(1)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 6)
-                                            .background(.thinMaterial)
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.vertical, 6)
+                if store.dailyLimitSeconds == 0 {
+                    Text("Set a daily limit above zero to continue.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Button {
@@ -1967,16 +1962,111 @@ struct OnboardingView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canProceedFromStep1)
+                .disabled(!canProceedFromTimeLimitStep)
                 .padding(.top, 8)
             }
             .padding()
         }
-        .navigationTitle("Onboarding")
+        .navigationTitle("Time limit")
+        .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
     }
 
-    private var onboardingStep2: some View {
+    private var onboardingBlockedAppsStep: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Blocked apps")
+                            .font(.title2.bold())
+                        Text("Choose the apps PhoneLockAI should block whenever your unlock timer isn’t active. After this, you’ll pick daily habits.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    GroupBox(label: Text("Blocked Apps").font(.subheadline).foregroundStyle(.secondary)) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Tap below to open Apple’s picker. You can select individual apps or whole categories.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                showingAppPicker = true
+                            } label: {
+                                Text(store.blockedAppCount == 0 ? "Select Blocked Apps" : "Edit Blocked Apps (\(store.blockedAppCount))")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            if store.blockedAppCount == 0 {
+                                Text("Select at least one app or category to continue.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(store.blockedAppTokens, id: \.self) { token in
+                                            Label(token)
+                                                .lineLimit(1)
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 6)
+                                                .background(.thinMaterial)
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+
+                    Button {
+                        onboardingStep = 11
+                    } label: {
+                        Text("Next")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canProceedFromBlockedAppsStep)
+                    .padding(.top, 8)
+                }
+                .padding()
+            }
+
+            HStack(alignment: .center) {
+                Spacer(minLength: 0)
+                Button {
+                    onboardingStep = 11
+                } label: {
+                    Text("Skip for now")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 11)
+                        .background(Color.secondary.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.secondary.opacity(0.28), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal)
+            .padding(.bottom, 12)
+            .padding(.top, 4)
+        }
+        .navigationTitle("Blocked apps")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .familyActivityPicker(
+            isPresented: $showingAppPicker,
+            selection: store.blockedAppsSelectionPickerBinding()
+        )
+    }
+
+    private var onboardingHabitsStep: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("What are some daily habits you’d like to implement?")
@@ -3221,7 +3311,7 @@ struct EditBlockedAppsView: View {
         }
         .familyActivityPicker(
             isPresented: $showingAppPicker,
-            selection: $store.blockedAppsSelection
+            selection: store.blockedAppsSelectionPickerBinding()
         )
     }
 }
