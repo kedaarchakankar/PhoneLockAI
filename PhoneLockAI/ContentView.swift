@@ -1727,11 +1727,23 @@ struct OnboardingView: View {
     }
 
     private var onboardingPaymentStep: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Choose your plan")
+        let yearlyPrice = 49.99
+        let yearlyMonthlyEquivalent = (yearlyPrice / 12.0 * 100).rounded() / 100
+        let yearlyPerMonthText = String(format: "$%.2f", yearlyMonthlyEquivalent)
+
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Start taking back your time.")
                 .font(.title2.bold())
 
-            Text("Start with a 7 day free trial. Cancel anytime.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("• Block distracting apps")
+                Text("• AI-powered unlock coaching")
+                Text("• Stay accountable with goals")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+
+            Text("Start your 7-day free trial. Cancel anytime.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -1743,10 +1755,10 @@ struct OnboardingView: View {
                         Text("Monthly")
                             .font(.headline.weight(.semibold))
                         Spacer()
-                        Text("$4.99")
+                        Text("$5.99")
                             .font(.title3.weight(.bold))
                     }
-                    Text("7 day free trial, then $4.99 per month")
+                    Text("7 day free trial, then $5.99 per month")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -1770,14 +1782,14 @@ struct OnboardingView: View {
                             .font(.headline.weight(.semibold))
                         Spacer()
                         HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text("$3.33")
+                            Text(yearlyPerMonthText)
                                 .font(.title3.weight(.bold))
                             Text("/mo")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    Text("7 day free trial, then $39.99 per year")
+                    Text("7 day free trial, then $49.99 per year")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -2325,11 +2337,30 @@ struct GoalsListView: View {
         store.goalsForToday(now: now)
     }
 
+    private var completedGoalsCount: Int {
+        todaysGoals.filter { $0.isCompleted(on: now) }.count
+    }
+
+    private var goalsProgressText: String {
+        let total = todaysGoals.count
+        guard total > 0 else { return "0% complete" }
+        let percent = Int((Double(completedGoalsCount) / Double(total) * 100).rounded())
+        return "\(percent)% complete"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Today's Goals")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Today's Goals")
+                        .font(.headline)
+                    if !todaysGoals.isEmpty {
+                        Text(goalsProgressText)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(goalsProgressText)
+                    }
+                }
                 Spacer()
                 Button {
                     onAddGoal()
@@ -2812,6 +2843,7 @@ struct ChatUnlockView: View {
         }
     }
 
+    @MainActor
     private func sendMessage() async {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -2826,7 +2858,7 @@ struct ChatUnlockView: View {
         do {
             let assistantText = try await sendMessageWithTimeout(
                 conversation: messages,
-                goals: store.goalsForToday().map(\.text),
+                goals: todaysGoalsForAI(),
                 timeoutSeconds: 10
             )
             messages.append(ChatMessage(role: .assistant, content: assistantText))
@@ -2844,9 +2876,10 @@ struct ChatUnlockView: View {
         }
     }
 
+    @MainActor
     private func startFallbackUnlockCountdown() {
         fallbackUnlockCountdownSeconds = 15
-        Task {
+        Task { @MainActor in
             while fallbackUnlockCountdownSeconds > 0 {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard errorText == chatFailureFallbackText, unlockMinutes == 15 else { return }
@@ -2874,6 +2907,15 @@ struct ChatUnlockView: View {
             }
             group.cancelAll()
             return first
+        }
+    }
+
+    /// Formats today's goals with completion markers so the AI can distinguish done vs pending.
+    private func todaysGoalsForAI() -> [String] {
+        let today = Date()
+        return store.goalsForToday(now: today).map { goal in
+            let marker = goal.isCompleted(on: today) ? "[Completed]" : "[Not completed]"
+            return "\(marker) \(goal.text)"
         }
     }
 
