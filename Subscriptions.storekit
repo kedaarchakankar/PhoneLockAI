@@ -1,0 +1,89 @@
+{
+  "identifier" : "D9B0C3A0-0A4B-4A90-8F0C-541D8A9E8E10",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "5.99",
+      "familyShareable" : false,
+      "internalID" : "6A67B0D0-6C6A-4207-829D-2C3B9E8F4AA1",
+      "localizations" : [
+        {
+          "description" : "PhoneLockAI Monthly Subscription",
+          "displayName" : "PhoneLockAI Monthly",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "PhoneLockAI.monthly",
+      "recurringSubscriptionPeriod" : "P1M",
+      "referenceName" : "PhoneLockAI Monthly",
+      "subscriptionGroupID" : "B6A95D90-E7DB-4B38-9A72-4B5F30D1E3A9",
+      "type" : "RecurringSubscription"
+    },
+    {
+      "displayPrice" : "49.99",
+      "familyShareable" : false,
+      "internalID" : "2D2D54C4-8216-4D7A-9A68-5B8628D30415",
+      "localizations" : [
+        {
+          "description" : "PhoneLockAI Yearly Subscription",
+          "displayName" : "PhoneLockAI Yearly",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "PhoneLockAI.yearly",
+      "recurringSubscriptionPeriod" : "P1Y",
+      "referenceName" : "PhoneLockAI Yearly",
+      "subscriptionGroupID" : "B6A95D90-E7DB-4B38-9A72-4B5F30D1E3A9",
+      "type" : "RecurringSubscription"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "93C2E3EF-A948-47F4-8F2A-0FA0D6A31210",
+    "_developerTeamID" : "0000000000",
+    "_disableDialogs" : false,
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 736905600,
+    "_locale" : "en_US",
+    "_renewalBillingIssuesEnabled" : false,
+    "_storefront" : "USA",
+    "_timeRate" : 1
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "B6A95D90-E7DB-4B38-9A72-4B5F30D1E3A9",
+      "localizations" : [
+        {
+          "locale" : "en_US",
+          "name" : "PhoneLockAI Sub"
+        }
+      ],
+      "name" : "PhoneLockAI Sub",
+      "subscriptions" : [
+        {
+          "productID" : "PhoneLockAI.monthly",
+          "subscriptionPeriod" : "P1M",
+          "subscriptionPrice" : "5.99",
+          "introductoryOffer" : {
+            "mode" : "freeTrial",
+            "period" : "P7D"
+          }
+        },
+        {
+          "productID" : "PhoneLockAI.yearly",
+          "subscriptionPeriod" : "P1Y",
+          "subscriptionPrice" : "49.99",
+          "introductoryOffer" : {
+            "mode" : "freeTrial",
+            "period" : "P7D"
+          }
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

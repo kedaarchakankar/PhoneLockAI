@@ -66,6 +66,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		3F48A9A82FA67EA300F5D723 /* Subscriptions.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Subscriptions.storekit; sourceTree = "<group>"; };
+		3F48A9A92FA67EC700F5D723 /* Subscriptions.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Subscriptions.storekit; sourceTree = "<group>"; };
 		3F6A35532F75843C00BBA126 /* PhoneLock.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PhoneLock.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F6A35552F75843C00BBA126 /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
 		3F6A35652F75843C00BBA126 /* FamilyControls.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FamilyControls.framework; path = System/Library/Frameworks/FamilyControls.framework; sourceTree = SDKROOT; };
@@ -189,6 +191,8 @@
 		3F8058722F6C568400DAEC70 = {
 			isa = PBXGroup;
 			children = (
+				3F48A9A82FA67EA300F5D723 /* Subscriptions.storekit */,
+				3F48A9A92FA67EC700F5D723 /* Subscriptions.storekit */,
 				3F80587D2F6C568400DAEC70 /* PhoneLockAI */,
 				3F80588B2F6C568600DAEC70 /* PhoneLockAITests */,
 				3F8058952F6C568600DAEC70 /* PhoneLockAIUITests */,

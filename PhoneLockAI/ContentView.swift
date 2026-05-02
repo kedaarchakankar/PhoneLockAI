@@ -11,6 +11,7 @@ import UserNotifications
 import FamilyControls
 import ManagedSettings
 import DeviceActivity
+import StoreKit
 
 // MARK: - Models
 
@@ -1146,6 +1147,7 @@ private enum Route: Hashable {
 
 struct ContentView: View {
     @StateObject private var store = PhoneLockStore()
+    @EnvironmentObject private var subscriptionManager: SubscriptionManager
     @State private var navPath: [Route] = []
     @Environment(\.scenePhase) private var scenePhase
 
@@ -1176,6 +1178,7 @@ struct ContentView: View {
                             ChatUnlockView(
                                 store: store,
                                 onUnlock: { minutes in
+                                    guard subscriptionManager.canUsePremiumFeatures else { return }
                                     store.startUnlock(durationMinutes: minutes, isEmergency: false)
                                     navPath.removeAll()
                                 }
@@ -1184,13 +1187,15 @@ struct ContentView: View {
                             SettingsView(
                                 store: store,
                                 onEmergencyUnlock: { durationMinutes in
+                                    guard subscriptionManager.canUsePremiumFeatures else { return }
                                     guard store.canStartEmergencyUnlock else { return }
                                     store.startEmergencyUnlockIfAllowed(durationMinutes: durationMinutes)
                                     navPath.removeAll()
                                 },
                                 onDailyLimitSaved: {
                                     navPath.removeAll()
-                                }
+                                },
+                                canUsePremiumFeatures: subscriptionManager.canUsePremiumFeatures
                             )
                         case .addGoal:
                             AddGoalView(
@@ -1231,6 +1236,9 @@ struct ContentView: View {
         }
         .onAppear {
             store.reconcileActiveUnlockIfNeeded()
+            Task {
+                await subscriptionManager.updateSubscriptionStatus()
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
@@ -1241,6 +1249,10 @@ struct ContentView: View {
                 // Re-apply immediately when transitioning away from active as a best-effort sync.
                 store.reconcileActiveUnlockIfNeeded()
             }
+        }
+        .task {
+            await subscriptionManager.loadProducts()
+            await subscriptionManager.updateSubscriptionStatus()
         }
         .task {
             // Keep unlock state authoritative even if the sticky view is not visible.
@@ -1384,6 +1396,7 @@ private enum OnboardingPhoneStruggle: String, CaseIterable, Identifiable {
 
 struct OnboardingView: View {
     @ObservedObject var store: PhoneLockStore
+    @EnvironmentObject private var subscriptionManager: SubscriptionManager
     var onDone: () -> Void
 
     @State private var onboardingStep: Int = 0
@@ -1727,9 +1740,8 @@ struct OnboardingView: View {
     }
 
     private var onboardingPaymentStep: some View {
-        let yearlyPrice = 49.99
-        let yearlyMonthlyEquivalent = (yearlyPrice / 12.0 * 100).rounded() / 100
-        let yearlyPerMonthText = String(format: "$%.2f", yearlyMonthlyEquivalent)
+        let monthlyPriceText = priceText(for: "PhoneLockAI.monthly", fallback: "$5.99")
+        let yearlyPriceText = priceText(for: "PhoneLockAI.yearly", fallback: "$49.99")
 
         return VStack(alignment: .leading, spacing: 16) {
             Text("Start taking back your time.")
@@ -1748,17 +1760,26 @@ struct OnboardingView: View {
                 .foregroundStyle(.secondary)
 
             Button {
-                onboardingStep = 7
+                Task {
+                    guard let monthly = subscriptionManager.product(for: "PhoneLockAI.monthly") else {
+                        await subscriptionManager.loadProducts()
+                        return
+                    }
+                    await subscriptionManager.purchase(product: monthly)
+                    if subscriptionManager.canUsePremiumFeatures {
+                        onboardingStep = 7
+                    }
+                }
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Monthly")
                             .font(.headline.weight(.semibold))
                         Spacer()
-                        Text("$5.99")
+                        Text(monthlyPriceText)
                             .font(.title3.weight(.bold))
                     }
-                    Text("7 day free trial, then $5.99 per month")
+                    Text("7 day free trial, then \(monthlyPriceText) per month")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -1774,22 +1795,26 @@ struct OnboardingView: View {
             .buttonStyle(.plain)
 
             Button {
-                onboardingStep = 7
+                Task {
+                    guard let yearly = subscriptionManager.product(for: "PhoneLockAI.yearly") else {
+                        await subscriptionManager.loadProducts()
+                        return
+                    }
+                    await subscriptionManager.purchase(product: yearly)
+                    if subscriptionManager.canUsePremiumFeatures {
+                        onboardingStep = 7
+                    }
+                }
             } label: {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline) {
+                    HStack {
                         Text("Yearly")
                             .font(.headline.weight(.semibold))
                         Spacer()
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text(yearlyPerMonthText)
-                                .font(.title3.weight(.bold))
-                            Text("/mo")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
+                        Text(yearlyPriceText)
+                            .font(.title3.weight(.bold))
                     }
-                    Text("7 day free trial, then $49.99 per year")
+                    Text("7 day free trial, then \(yearlyPriceText) per year")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -1804,12 +1829,55 @@ struct OnboardingView: View {
             }
             .buttonStyle(.plain)
 
+            Button {
+                Task {
+                    await subscriptionManager.restorePurchases()
+                    if subscriptionManager.canUsePremiumFeatures {
+                        onboardingStep = 7
+                    }
+                }
+            } label: {
+                Text("Restore Purchases")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            if subscriptionManager.canUsePremiumFeatures {
+                Button {
+                    onboardingStep = 7
+                } label: {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if subscriptionManager.isLoading {
+                ProgressView("Checking subscription...")
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+
+            if let error = subscriptionManager.errorMessage {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Spacer(minLength: 0)
         }
         .padding()
         .navigationTitle("Free Trial")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
+        .task {
+            await subscriptionManager.loadProducts()
+            await subscriptionManager.updateSubscriptionStatus()
+        }
+    }
+
+    private func priceText(for productID: String, fallback: String) -> String {
+        subscriptionManager.product(for: productID)?.displayPrice ?? fallback
     }
 
     private var onboardingNotificationsPermissionStep: some View {
@@ -2187,6 +2255,7 @@ struct OnboardingView: View {
 
 struct HomeDashboardView: View {
     @ObservedObject var store: PhoneLockStore
+    @EnvironmentObject private var subscriptionManager: SubscriptionManager
     var onStartChat: () -> Void
     var onOpenSettings: () -> Void
     var onAddGoal: () -> Void
@@ -2235,7 +2304,11 @@ struct HomeDashboardView: View {
                         onEditGoal: onEditGoal,
                         onSeeAllGoals: onSeeAllGoals
                     )
-                    HomeActionsView(store: store, onStartChat: onStartChat)
+                    HomeActionsView(
+                        store: store,
+                        onStartChat: onStartChat,
+                        canUsePremiumFeatures: subscriptionManager.canUsePremiumFeatures
+                    )
                 }
                 .padding()
             }
@@ -2621,6 +2694,7 @@ struct GoalRowView: View {
 struct HomeActionsView: View {
     @ObservedObject var store: PhoneLockStore
     let onStartChat: () -> Void
+    let canUsePremiumFeatures: Bool
 
     var body: some View {
         VStack(spacing: 12) {
@@ -2631,7 +2705,14 @@ struct HomeActionsView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(store.isUnlockActive)
+            .disabled(store.isUnlockActive || !canUsePremiumFeatures)
+
+            if !canUsePremiumFeatures {
+                Text("You need an active PhoneLockAI subscription to use app blocking and AI unlock.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -3121,6 +3202,7 @@ struct SettingsView: View {
     @ObservedObject var store: PhoneLockStore
     var onEmergencyUnlock: (_ durationMinutes: Int) -> Void
     var onDailyLimitSaved: () -> Void
+    let canUsePremiumFeatures: Bool
 
     var body: some View {
         List {
@@ -3139,7 +3221,8 @@ struct SettingsView: View {
             NavigationLink("Emergency Unlock") {
                 EmergencyUnlockSettingsView(
                     store: store,
-                    onEmergencyUnlock: onEmergencyUnlock
+                    onEmergencyUnlock: onEmergencyUnlock,
+                    canUsePremiumFeatures: canUsePremiumFeatures
                 )
             }
             NavigationLink("Unlock diagnostics") {
@@ -3247,6 +3330,7 @@ struct EditDailyLimitView: View {
 struct EmergencyUnlockSettingsView: View {
     @ObservedObject var store: PhoneLockStore
     var onEmergencyUnlock: (_ durationMinutes: Int) -> Void
+    let canUsePremiumFeatures: Bool
     @State private var selectedHours: Int = 0
     @State private var selectedMinutes: Int = 5
 
@@ -3285,6 +3369,11 @@ struct EmergencyUnlockSettingsView: View {
             }
 
             Section {
+                if !canUsePremiumFeatures {
+                    Text("You need an active PhoneLockAI subscription to use app blocking and AI unlock.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
                 Toggle("Enable Emergency Unlock", isOn: $store.emergencyUnlockEnabled)
                 Button {
                     onEmergencyUnlock(selectedTotalMinutes)
@@ -3293,7 +3382,7 @@ struct EmergencyUnlockSettingsView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!store.canStartEmergencyUnlock || selectedTotalMinutes <= 0)
+                .disabled(!canUsePremiumFeatures || !store.canStartEmergencyUnlock || selectedTotalMinutes <= 0)
             }
         }
         .navigationTitle("Emergency Unlock")
@@ -3359,15 +3448,83 @@ struct EditBlockedAppsView: View {
 }
 
 struct MyAccountView: View {
+    @EnvironmentObject private var subscriptionManager: SubscriptionManager
+    @Environment(\.openURL) private var openURL
+
+    private static let renewalDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private var renewalDateText: String {
+        guard let renewalDate = subscriptionManager.nextRenewalDate else { return "Not available" }
+        return Self.renewalDateFormatter.string(from: renewalDate)
+    }
+
     var body: some View {
-        VStack {
-            Spacer()
-            Text("My Account")
-                .font(.headline)
-            Spacer()
+        List {
+            Section("Subscription") {
+                HStack {
+                    Text("Status")
+                    Spacer()
+                    Text(subscriptionManager.hasActiveSubscription ? "Active" : "Inactive")
+                        .foregroundStyle(subscriptionManager.hasActiveSubscription ? .green : .secondary)
+                }
+
+                HStack(alignment: .top) {
+                    Text("Current Plan")
+                    Spacer()
+                    Text(subscriptionManager.currentSubscriptionDisplayName() ?? "No active plan")
+                        .multilineTextAlignment(.trailing)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Next Renewal")
+                    Spacer()
+                    Text(renewalDateText)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button("Manage Subscription") {
+                    Task {
+                        if let scene = await currentWindowScene() {
+                            do {
+                                try await AppStore.showManageSubscriptions(in: scene)
+                                return
+                            } catch {
+                                // Fallback URL used if App Store sheet fails to open.
+                            }
+                        }
+                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                            openURL(url)
+                        }
+                    }
+                }
+            }
+
+            if let error = subscriptionManager.errorMessage {
+                Section("StoreKit") {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
         }
-        .padding()
         .navigationTitle("My Account")
+        .task {
+            await subscriptionManager.loadProducts()
+            await subscriptionManager.updateSubscriptionStatus()
+        }
+    }
+
+    @MainActor
+    private func currentWindowScene() -> UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive })
     }
 }
 
@@ -3582,4 +3739,5 @@ struct AddGoalView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(SubscriptionManager())
 }
